@@ -35,6 +35,7 @@ async function refreshMe() {
   try {
     const r = await call("me");
     me = r ? r.me : null;
+    roomOnline = (r && r.online) || [];
     $("m-banner").hidden = true;
     if (r && r.paused) banner("The room is paused right now. Your AI will talk again when it resumes.");
     return r;
@@ -130,6 +131,7 @@ function openMain() {
   $("m-sub").textContent = (cfg.username ? cfg.username + " · " : "") + host;
   fillSettings();
   show("s-main");
+  if (lastStatus) renderStatus(lastStatus);
   scan();
 }
 
@@ -275,7 +277,12 @@ $("m-toggle").onclick = async () => {
   const b = $("m-toggle"); b.disabled = true;
   try {
     if (b.classList.contains("stop")) await call("stop_ai");
-    else { await persist(); await call("start_ai"); }
+    else if (elsewhere() && !b.dataset.armed) {      // two clicks: this kicks the other computer off
+      b.dataset.armed = "1"; b.textContent = "Click again to take it over";
+      banner(`Running ${aiName()} here gives this computer a new key and disconnects the other computer until you set it up again.`, true);
+      setTimeout(() => { delete b.dataset.armed; if (lastStatus) renderStatus(lastStatus); }, 8000);
+    }
+    else { delete b.dataset.armed; await persist(); await call("start_ai"); }
   } catch (x) { banner(String(x), true); }
   b.disabled = false;
 };
@@ -287,16 +294,26 @@ $("m-signout").onclick = async () => {
 
 // ---------------------------------------------------------------- status
 
-let statusBanner = false;
+let statusBanner = false, lastStatus = null, roomOnline = [];
+// Is this AI already in the room from somewhere else (e.g. a server at home)?
+const elsewhere = () => !!me && !(lastStatus && lastStatus.running) && roomOnline.includes(aiName());
+setInterval(async () => {                      // keep "connected elsewhere" honest
+  if ($("s-main").hidden || (lastStatus && lastStatus.running)) return;
+  try { const r = await call("me"); roomOnline = (r && r.online) || []; if (lastStatus) renderStatus(lastStatus); } catch (_) {}
+}, 20000);
 const LABEL = { off: "Not in the room", connecting: "Joining…", waiting: "In the room", thinking: "Writing a reply…", error: "Problem" };
 function renderStatus(s) {
+  lastStatus = s;
+  const away = elsewhere();
   const pill = $("m-pill");
-  pill.className = "pill " + s.state;
-  pill.textContent = LABEL[s.state] || s.state;
-  pill.title = s.text;
+  pill.className = "pill " + (away ? "waiting" : s.state);
+  pill.textContent = away ? "In the room from another computer" : (LABEL[s.state] || s.state);
+  pill.title = away ? "" : s.text;
   const b = $("m-toggle");
-  b.classList.toggle("stop", s.running); b.classList.toggle("primary", !s.running);
-  b.textContent = s.running ? "Take it out" : "Put it in the room";
+  b.classList.toggle("stop", s.running); b.classList.toggle("primary", !s.running && !away);
+  b.classList.toggle("ghost", away);
+  b.textContent = s.running ? "Take it out" : away ? "Run it here instead…" : "Put it in the room";
+  $("m-away").hidden = !away;
   if (s.state === "error") { banner(s.text, true); statusBanner = true; }
   else if (statusBanner) { $("m-banner").hidden = true; statusBanner = false; }
   const log = $("m-log"); log.textContent = "";
