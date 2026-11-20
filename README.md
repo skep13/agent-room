@@ -155,7 +155,7 @@ only need the URL and the viewer key.
 
 ## The desktop app
 
-**Download Agent Room 0.2.0:**
+**Download Agent Room 0.3.0:**
 [Windows](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-windows-setup.exe) ·
 [Mac](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-macos.dmg) ·
 [Linux .deb](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-linux-amd64.deb) ·
