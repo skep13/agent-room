@@ -102,6 +102,40 @@ CHANGES_RE = re.compile(r"\[changes\]", re.I)
 FENCE_RE = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.S)
 PATH_RE = re.compile(r"^[A-Za-z0-9_.\-/ ]{1,200}$")
 
+def setup_script(name, hub, cfg):
+    """Shell script that installs the connector on an owner's server as a service."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "ai"
+    conf = json.dumps(cfg, indent=2)
+    return f"""#!/bin/sh
+# Agent Room: connect {name} from this server. Generated once; the key inside is new.
+set -e
+S=""; [ "$(id -u)" -eq 0 ] || S=sudo
+command -v python3 >/dev/null 2>&1 || {{ echo "Agent Room needs python3. Install it (e.g. apt install python3) and get a new command from the app." >&2; exit 1; }}
+echo "Setting up {name} for the Agent Room..."
+$S mkdir -p /opt/agent-room /etc/agent-room
+curl -fsSL {hub}/connector.py | $S tee /opt/agent-room/connector.py >/dev/null
+id agentroom >/dev/null 2>&1 || $S useradd --system --no-create-home --shell /usr/sbin/nologin agentroom 2>/dev/null || true
+$S sh -c 'umask 077; cat > /etc/agent-room/{slug}.json' <<'AGENTROOMJSON'
+{conf}
+AGENTROOMJSON
+U=root; id agentroom >/dev/null 2>&1 && U=agentroom && $S chown agentroom /etc/agent-room/{slug}.json
+echo "Checking your model at {cfg['model_url']} ..."
+if R=$($S python3 /opt/agent-room/connector.py /etc/agent-room/{slug}.json --test 2>&1); then echo "Your model answered: $R"
+else echo "$R" | tail -n 1 >&2; echo "Couldn't get an answer from your model. Fix model_url / model in /etc/agent-room/{slug}.json, then: $S systemctl restart agent-room-{slug}" >&2; fi
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  printf '%s\\n' '[Unit]' 'Description=Agent Room connector for {name}' 'After=network-online.target' 'Wants=network-online.target' '' \
+    '[Service]' "User=$U" 'ExecStart=/usr/bin/env python3 -u /opt/agent-room/connector.py /etc/agent-room/{slug}.json' \
+    'Restart=always' 'RestartSec=10' '' '[Install]' 'WantedBy=multi-user.target' | $S tee /etc/systemd/system/agent-room-{slug}.service >/dev/null
+  $S systemctl daemon-reload
+  $S systemctl enable agent-room-{slug} >/dev/null 2>&1
+  $S systemctl restart agent-room-{slug}
+  echo "Done: {name} is joining the room and will start with this server. Logs: journalctl -u agent-room-{slug} -f"
+else
+  echo "No systemd here. Start it with: nohup python3 /opt/agent-room/connector.py /etc/agent-room/{slug}.json &"
+fi
+"""
+
+
 # ---- earned skills
 # Every skill starts at a neutral guess; the model's name, a tryout and real reviews move it.
 BASELINE = {sk: [0.4, 1.0] for sk in ("planning", "coding", "writing", "research", "review", "design")}
@@ -1176,6 +1210,7 @@ class Handler(BaseHTTPRequestHandler):
     limiter = Limiter()
     handoffs = {}        # one-time code -> (account id, expiry): the desktop app opens the room signed in
     handoff_lock = threading.Lock()
+    setups = {}          # one-time code -> (agent id, model_url, model, expiry): "connect your server" command
 
     def log_message(self, fmt, *args):
         pass
@@ -1302,13 +1337,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             return self.end_headers()
         if p == "/api/app-downloads":              # public: where the desktop app lives
-            v = self.room.s.get("app_version") or "0.3.1"
+            v = self.room.s.get("app_version") or "0.4.0"
             base = f"https://github.com/skep13/agent-room/releases/download/v{v}/AgentRoom-{v}"
             return self.send(200, {"version": v, "files": [
                 {"os": "mac", "label": "Mac", "url": f"{base}-macos.dmg"},
                 {"os": "windows", "label": "Windows", "url": f"{base}-windows-setup.exe"},
                 {"os": "linux", "label": "Linux (AppImage)", "url": f"{base}-linux-x86_64.AppImage"},
                 {"os": "linux-deb", "label": "Linux (.deb)", "url": f"{base}-linux-amd64.deb"}]})
+        m = re.fullmatch(r"/setup/([A-Za-z0-9_-]{20,})", p)
+        if m:                                       # one-time install script for the owner's server
+            with self.handoff_lock:
+                hit = self.setups.pop(m.group(1), None)
+            if not hit or hit[3] < time.time():
+                return self.send(404, b"echo 'This setup command has expired or was already used. Get a new one from the Agent Room app.' >&2; exit 1\n",
+                                 "text/x-shellscript; charset=utf-8")
+            aid, model_url, model = hit[:3]
+            ag = self.room.s.agent(aid)
+            hub = ("https://" if self.https() else "http://") + self.host()
+            cfg = {"hub": hub, "token": self.room.s.new_agent_token(aid), "model_url": model_url, "model": model,
+                   "model_key": "", "own_persona": True, "max_tokens": 1200, "task_max_tokens": 6000,
+                   "temperature": 0.8}
+            return self.send(200, setup_script(ag["name"], hub, cfg).encode(), "text/x-shellscript; charset=utf-8")
         if p == "/connector.py":                   # public: holds no secrets
             path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "connector.py")
             with open(path, "rb") as f:
@@ -1587,7 +1636,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def me(self, p, b, acct):
         s, aid = self.room.s, acct["agent_id"]
-        if b.get("agent_id") is not None and p in ("/api/me/agent", "/api/me/token"):
+        if b.get("agent_id") is not None and p in ("/api/me/agent", "/api/me/token", "/api/me/setup"):
             want = int(b.get("agent_id") or 0)
             if want not in {a["id"] for a in s.owned_agents(acct["id"])}:
                 return self.send(403, {"error": "that isn't one of your AIs"})
@@ -1612,6 +1661,20 @@ class Handler(BaseHTTPRequestHandler):
             self.room.post("system", "room", f"{acct['username']} added a new AI: {name}")
             self.room.broadcast("state", self.room.state())
             return self.send(200, {"ok": True, "agent": s.agent(new)})
+        if p == "/api/me/setup":                    # "connect your server": a one-time install command
+            model_url, model = str(b.get("model_url", "")).strip(), str(b.get("model", "")).strip()
+            if not re.fullmatch(r"https?://[^\s'\"\\`$]{3,200}", model_url):
+                return self.send(400, {"error": "model address must look like http://127.0.0.1:8765/v1"})
+            if not re.fullmatch(r"[^\s'\"\\`$]{1,120}", model):
+                return self.send(400, {"error": "fill in the model name (no spaces)"})
+            code = secrets.token_urlsafe(24)
+            with self.handoff_lock:
+                now = time.time()
+                for c in [c for c, v in self.setups.items() if v[3] < now]:
+                    del self.setups[c]
+                self.setups[code] = (aid, model_url, model, now + 3600)
+            hub = ("https://" if self.https() else "http://") + self.host()
+            return self.send(200, {"command": f"curl -fsSL {hub}/setup/{code} | sh", "expires_in": 3600})
         if p == "/api/me/handoff":       # the desktop app opens the room page already signed in
             code = secrets.token_urlsafe(24)
             with self.handoff_lock:

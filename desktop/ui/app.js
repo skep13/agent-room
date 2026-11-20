@@ -131,8 +131,10 @@ function openMain() {
   $("m-sub").textContent = (cfg.username ? cfg.username + " · " : "") + host;
   fillSettings();
   show("s-main");
+  try { const s = JSON.parse(localStorage.getItem("ar-server") || "{}"); $("s-url").value = s.url || ""; $("s-model").value = s.model || ""; } catch (_) {}
   if (lastStatus) renderStatus(lastStatus);
-  scan();
+  if (cfg.model_url || cfg.persona) $("m-adv").open = true;   // already set up to run here
+  if ($("m-adv").open) scan();
 }
 
 function fillSettings() {
@@ -286,6 +288,23 @@ $("m-toggle").onclick = async () => {
   } catch (x) { banner(String(x), true); }
   b.disabled = false;
 };
+$("m-adv").ontoggle = () => { if ($("m-adv").open) scan(); if (lastStatus) renderStatus(lastStatus); };
+$("s-get").onclick = async () => {
+  const b = $("s-get"); b.disabled = true; err($("s-err"));
+  const url = $("s-url").value.trim() || "http://127.0.0.1:8765/v1", model = $("s-model").value.trim();
+  try {
+    if (!model) throw "Fill in the model name: the one your model server calls it.";
+    const r = await call("server_setup", { modelUrl: url, model });
+    try { localStorage.setItem("ar-server", JSON.stringify({ url, model })); } catch (_) {}
+    $("s-cmd").textContent = r.command; $("s-out").hidden = false; $("s-copied").textContent = "";
+  } catch (x) { err($("s-err"), String(x)); }
+  b.disabled = false;
+};
+$("s-copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("s-cmd").textContent); $("s-copied").textContent = "Copied."; }
+  catch (_) { const r = document.createRange(); r.selectNodeContents($("s-cmd")); const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    $("s-copied").textContent = "Selected: press ⌘C / Ctrl+C."; }
+};
 $("m-watch").onclick = () => call("open_room").catch(x => banner(String(x), true));
 $("m-profile").onclick = () => openProfile(false);
 $("m-signout").onclick = async () => {
@@ -313,7 +332,13 @@ function renderStatus(s) {
   b.classList.toggle("stop", s.running); b.classList.toggle("primary", !s.running && !away);
   b.classList.toggle("ghost", away);
   b.textContent = s.running ? "Take it out" : away ? "Run it here instead…" : "Put it in the room";
-  $("m-away").hidden = !away;
+  b.hidden = !(s.running || $("m-adv").open);
+  const online = roomOnline.includes(aiName());
+  $("m-away").hidden = !(away && $("m-adv").open);
+  $("m-away").textContent = `${aiName()} is already in the room from your server. Running it here would disconnect the server.`;
+  $("m-srv-status").textContent = s.running ? `${aiName()} is running from this computer.`
+    : online ? `✓ ${aiName()} is in the room from your server.` : `${aiName()} isn't connected yet.`;
+  if (!s.running) { pill.className = "pill " + (online ? "waiting" : "off"); pill.textContent = online ? "In the room" : "Not connected"; }
   if (s.state === "error") { banner(s.text, true); statusBanner = true; }
   else if (statusBanner) { $("m-banner").hidden = true; statusBanner = false; }
   const log = $("m-log"); log.textContent = "";

@@ -65,6 +65,10 @@ button.stop{background:var(--panel);color:var(--bad);border-color:currentColor;f
 .swatches button{width:30px;height:30px;padding:0;border-radius:50%;border:2px solid transparent}
 .swatches button.on{border-color:var(--ink)}
 
+.cmd{white-space:pre-wrap;word-break:break-all;user-select:all;background:rgba(127,127,127,.12);padding:10px;border-radius:8px;font-size:12px;margin:8px 0}
+.srv-status{font-weight:600;margin:4px 0 8px}
+.adv{margin-top:6px}
+.adv>summary{cursor:pointer;padding:8px 2px;color:var(--muted, #999);font-size:13px}
 /* main */
 .top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px}
 .top .who{flex:1 1 200px;min-width:0}

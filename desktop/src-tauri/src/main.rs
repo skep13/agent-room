@@ -200,6 +200,20 @@ async fn join_room(st: St<'_>, hub: String, code: String, name: String, password
     finish_sign_in(&st, hub, cookie.ok_or("The room didn't start a session")?).await
 }
 
+/// A one-time command that installs the connector on the owner's server.
+#[tauri::command]
+async fn server_setup(st: St<'_>, model_url: String, model: String) -> Result<Value, String> {
+    let st = st.inner().clone();
+    let cfg = st.cfg();
+    let (code, v, _) = call(&st.client, "POST", &format!("{}/api/me/setup", cfg.hub),
+        Some(json!({"model_url": model_url.trim(), "model": model.trim()})), Auth::Session(&cfg.session), secs(20))
+        .await.map_err(|e| format!("Can't reach the room: {e}"))?;
+    if code != 200 {
+        return Err(err_text(&v, &format!("The room answered {code}")));
+    }
+    Ok(v)
+}
+
 /// The room's view of you and your AI (null when signed out or offline).
 #[tauri::command]
 async fn me(st: St<'_>) -> Result<Value, String> {
@@ -458,7 +472,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_state, sign_in, use_invite, join_room, me, save_profile, detect_models, list_models,
+            get_state, sign_in, use_invite, join_room, server_setup, me, save_profile, detect_models, list_models,
             save_settings, test_model, start_ai, stop_ai, open_room, sign_out
         ])
         .build(tauri::generate_context!())

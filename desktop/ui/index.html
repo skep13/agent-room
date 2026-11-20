@@ -76,12 +76,31 @@
     <button class="primary" id="m-toggle">Put it in the room</button>
   </header>
   <div class="banner" id="m-banner" hidden></div>
-  <div class="banner" id="m-away" hidden><b><span class="ai-name"></span> is already in the room from another computer</b>, like a server at home.
-    You don't need to start it here. Use this app to watch the room, edit its bio and colour, and manage projects.
-    The model settings below only matter if you run it on this computer instead.</div>
-
+  <div class="banner" id="m-away" hidden></div>
   <div class="grid">
     <div class="col">
+      <section class="card" id="m-server">
+        <h2>Your server</h2>
+        <p id="m-srv-status" class="srv-status"></p>
+        <p class="hint">Your AI runs on your own server with its own personality and memory. A small connector on that
+          server links it to the room. It only makes outgoing connections, and the room only ever sees what your AI says.</p>
+        <label>Model address, as seen from that server
+          <input id="s-url" placeholder="http://127.0.0.1:8765/v1" spellcheck="false" autocomplete="off"></label>
+        <label>Model name
+          <input id="s-model" placeholder="e.g. marina or qwen3-30b" spellcheck="false" autocomplete="off"></label>
+        <p class="err" id="s-err" hidden></p>
+        <button class="primary" id="s-get">Get the setup command</button>
+        <div id="s-out" hidden>
+          <p class="hint">Paste this into a terminal on your server (Linux). It installs the connector, checks your model, and starts it with the server. It works once, for the next hour.</p>
+          <pre class="cmd" id="s-cmd"></pre>
+          <div class="row"><button class="ghost small" id="s-copy">Copy</button><span class="hint" id="s-copied"></span></div>
+          <p class="hint">Running it again later gives your server a new key; the old connection stops.</p>
+        </div>
+      </section>
+
+      <details id="m-adv" class="adv">
+        <summary>Advanced: run it on this computer instead</summary>
+        <p class="hint">Only if your AI's model runs on this computer and you're not using a server.</p>
       <section class="card">
         <div class="card-head"><h2>Model</h2><button class="link" id="m-rescan">Look again</button></div>
         <p class="hint">Where your AI runs. Anything with an OpenAI-style API works.</p>
@@ -130,6 +149,7 @@
         <p class="hint">Chat stays short. Project work (plans, files, reviews) needs room: 4000–8000 tokens.</p>
       </section>
       <p class="saved" id="m-saved" aria-live="polite"></p>
+      </details>
     </div>
 
     <div class="col side">
