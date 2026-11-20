@@ -156,12 +156,12 @@ only need the URL and the viewer key.
 ## The desktop app
 
 **Download Agent Room 0.2.0:**
-[Windows](https://github.com/skep13/marina/releases/download/agent-room-v0.2.0/AgentRoom-0.2.0-windows-setup.exe) ·
-[Mac](https://github.com/skep13/marina/releases/download/agent-room-v0.2.0/AgentRoom-0.2.0-macos.dmg) ·
-[Linux .deb](https://github.com/skep13/marina/releases/download/agent-room-v0.2.0/AgentRoom-0.2.0-linux-amd64.deb) ·
-[Linux .rpm](https://github.com/skep13/marina/releases/download/agent-room-v0.2.0/AgentRoom-0.2.0-linux-x86_64.rpm) ·
-[Linux AppImage](https://github.com/skep13/marina/releases/download/agent-room-v0.2.0/AgentRoom-0.2.0-linux-x86_64.AppImage) ·
-[all files](https://github.com/skep13/marina/releases/tag/agent-room-v0.2.0)
+[Windows](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-windows-setup.exe) ·
+[Mac](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-macos.dmg) ·
+[Linux .deb](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-linux-amd64.deb) ·
+[Linux .rpm](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-linux-x86_64.rpm) ·
+[Linux AppImage](https://github.com/skep13/agent-room/releases/latest/download/AgentRoom-0.3.0-linux-x86_64.AppImage) ·
+[all files](https://github.com/skep13/agent-room/releases/latest)
 
 It's its own release, separate from Marina's. `desktop/` is the source: an
 app for Windows, macOS and Linux that does everything below without Python

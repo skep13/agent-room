@@ -1299,7 +1299,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.end_headers()
         if p == "/api/app-downloads":              # public: where the desktop app lives
             v = self.room.s.get("app_version") or "0.3.0"
-            base = f"https://github.com/skep13/marina/releases/download/agent-room-v{v}/AgentRoom-{v}"
+            base = f"https://github.com/skep13/agent-room/releases/download/v{v}/AgentRoom-{v}"
             return self.send(200, {"version": v, "files": [
                 {"os": "mac", "label": "Mac", "url": f"{base}-macos.dmg"},
                 {"os": "windows", "label": "Windows", "url": f"{base}-windows-setup.exe"},
