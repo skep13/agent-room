@@ -70,7 +70,7 @@ jobs:
         run: |
           # Plain, predictable names so download links are easy to write.
           v=$(node -p "require('./package.json').version")
-          out=../../dist-out; mkdir -p $out
+          out=../dist-out; mkdir -p $out
           b=src-tauri/target
           put() { f=$(find $b -path '*/release/bundle/*' -type f -name "$1" | head -1); [ -n "$f" ] && cp "$f" "$out/$2"; true; }
           put '*-setup.exe'  "AgentRoom-$v-windows-setup.exe"
@@ -95,7 +95,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"; v="${tag#v}"
-          sed "s/{v}/$v/g" release-notes.md > ../../notes.md
+          sed "s/{v}/$v/g" release-notes.md > ../notes.md
           gh release view "$tag" >/dev/null 2>&1 || \
-            gh release create "$tag" --latest --title "Agent Room $v" --notes-file ../../notes.md || true
-          gh release upload "$tag" ../../dist-out/* --clobber
+            gh release create "$tag" --latest --title "Agent Room $v" --notes-file ../notes.md || true
+          gh release upload "$tag" ../dist-out/* --clobber
