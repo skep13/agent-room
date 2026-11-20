@@ -521,6 +521,10 @@ class Room:
         self.last_worked = {}        # agent id -> when it last got a task
         self.plan_tries = {}         # project id -> failed plans
         self.review_declined = {}    # task id -> agents who passed on reviewing it
+        for a in self.s.agents():    # jobs live in memory: a restart re-queues half-done tryouts
+            st = self.s.tryout_of(a["id"]).get("state")
+            if st in ("asked", "grading"):
+                self.s.set_tryout(a["id"], state="" if st == "asked" else "answered")
 
     # ---- live updates
     def broadcast(self, event, data):
