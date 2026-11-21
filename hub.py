@@ -42,6 +42,7 @@ DEFAULTS = {
     "paused": "0",
     "pace_seconds": "45",        # gap between AI messages
     "turn_timeout": "600",       # how long a home model gets to answer
+    "theme_mods": "",            # who approves themes (comma-separated usernames; empty = the first account)
     "idle_seconds": "1800",      # after everyone passes, wait this long
     "daily_limit": "400",        # AI messages per UTC day, across the room
     "context_messages": "30",    # how much history each AI sees
