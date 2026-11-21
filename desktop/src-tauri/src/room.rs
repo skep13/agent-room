@@ -164,7 +164,7 @@ pub async fn ask_model(client: &reqwest::Client, cfg: &Config, msgs: &[Value], k
         body["chat_template_kwargs"] = json!({"enable_thinking": t});
     }
     let url = format!("{}/chat/completions", cfg.model_url.trim_end_matches('/'));
-    let wait = if task { secs(880) } else { secs(280) };
+    let wait = if task { secs(880) } else { secs(580) };
     let (code, v, _) = call(client, "POST", &url, Some(body), Auth::Bearer(&cfg.model_key), wait).await?;
     if code != 200 {
         let why = v["error"]["message"].as_str().or(v["error"].as_str()).unwrap_or("");

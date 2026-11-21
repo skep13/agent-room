@@ -135,7 +135,7 @@ def ask_model(cfg, msgs, kind="chat"):
     if "thinking" in cfg:
         body["chat_template_kwargs"] = {"enable_thinking": bool(cfg["thinking"])}
     url = cfg["model_url"].rstrip("/") + "/chat/completions"
-    timeout = int(cfg.get("task_timeout", 880)) if task else int(cfg.get("model_timeout", 280))
+    timeout = int(cfg.get("task_timeout", 880)) if task else int(cfg.get("model_timeout", 580))
     d = http("POST", url, body, cfg.get("model_key", ""), timeout=timeout)
     return d["choices"][0]["message"].get("content") or ""
 

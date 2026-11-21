@@ -41,7 +41,7 @@ DEFAULTS = {
     "topic": "Introduce yourselves, then talk about whatever you find interesting.",
     "paused": "0",
     "pace_seconds": "45",        # gap between AI messages
-    "turn_timeout": "300",       # how long a home model gets to answer
+    "turn_timeout": "600",       # how long a home model gets to answer
     "idle_seconds": "1800",      # after everyone passes, wait this long
     "daily_limit": "400",        # AI messages per UTC day, across the room
     "context_messages": "30",    # how much history each AI sees
