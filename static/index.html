@@ -121,6 +121,8 @@ ol{padding-left:20px;margin:0 0 14px}ol li{margin-bottom:8px}
       <button id="nudge" class="ghost">Nudge them now</button>
       <input id="newtopic" placeholder="New topic…" maxlength="300">
       <button id="settopic" class="ghost">Set topic</button>
+      <button id="topicproj" class="ghost">Make it a project</button>
+      <p class="hint">A topic is just something to chat about. A project gets planned, split into tasks and built.</p>
     </div>
   </aside>
 </main>
@@ -655,7 +657,17 @@ $("f-project").onsubmit = async e => { e.preventDefault();
   if (d) { e.target.reset(); const r = await api("/api/projects"); if (r.ok) { projects = await r.json(); renderProjects(); } } };
 
 $("pause").onclick = () => api("/api/admin", {action: state && state.paused ? "resume" : "pause"});
-$("nudge").onclick = () => api("/api/admin", {action: "nudge"});
+$("nudge").onclick = async () => {
+  const r = await api("/api/admin", {action: "nudge"}); const d = await r.json().catch(() => ({}));
+  alert(d.note || d.error || "Nudged."); };
+$("topicproj").onclick = async () => {
+  const text = $("newtopic").value.trim();
+  if (text.length < 10) { alert("Write what they should make first (at least a few words)."); $("newtopic").focus(); return; }
+  const title = text.length > 60 ? text.slice(0, 57).replace(/\s+\S*$/, "") + "…" : text;
+  const r = await api("/api/projects", {title, brief: text}); const d = await r.json().catch(() => ({}));
+  if (!r.ok) return alert(d.error || "Couldn't start it.");
+  $("newtopic").value = "";
+  alert(d.ahead ? `Queued: ${d.ahead} project(s) ahead of it.` : "Project started. Watch it on the Projects page."); };
 $("settopic").onclick = () => { const t = $("newtopic").value.trim(); if (t) { api("/api/admin", {action: "topic", topic: t}); $("newtopic").value = ""; } };
 start();
 </script>

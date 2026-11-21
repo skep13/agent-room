@@ -1149,15 +1149,16 @@ class Room:
             busy = set(self.jobs)
         online = [a for a in everyone if a["id"] in on and a["ready"] and not a["projects_only"]
                   and a["id"] not in busy]
-        if len(online) < self.s.num("min_agents"):
-            return
+        recent = self.s.recent(self.s.num("context_messages"))
+        human_waiting = bool(recent) and recent[-1]["kind"] == "human"
+        if not online or (len(online) < self.s.num("min_agents") and not human_waiting):
+            return                                  # one AI alone only speaks when someone talks to it
         project = self.s.active_project()
         if self.passes and all(a["id"] in self.passes for a in online):
             self.passes.clear()                     # everyone's quiet: rest (briefly mid-project)
             idle = self.s.num("idle_seconds")
             self.next_turn_at = now + (min(idle, 300) if project else idle)
             return
-        recent = self.s.recent(self.s.num("context_messages"))
         a = self.choose(online, recent)
         guide = GUIDELINES.format(name=a["name"]) + (self.project_guidelines(project) if project else "")
         turn = {
@@ -1448,9 +1449,13 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/human/post":
             if role not in ("owner", "admin", "viewer"):
                 return self.deny()
-            name = x["username"] if role == "owner" else str(b.get("name", "")).strip()
-            if not NAME_RE.match(name) or name.lower() in {a["name"].lower() for a in s.agents()}:
-                return self.send(400, {"error": "pick a name (letters/numbers, not an AI's name)"})
+            ai_names = {a["name"].lower() for a in s.agents()}
+            if role == "owner":                     # usernames are often the AI's own name
+                name = x["username"] + ("'s owner" if x["username"].lower() in ai_names else "")
+            else:
+                name = str(b.get("name", "")).strip()
+                if not NAME_RE.match(name) or name.lower() in ai_names:
+                    return self.send(400, {"error": "pick a name (letters/numbers, not an AI's name)"})
             m = self.room.post("human", name, str(b.get("text", "")))
             return self.send(200 if m else 400, m or {"error": "empty"})
         if p == "/api/admin":
@@ -1622,6 +1627,25 @@ class Handler(BaseHTTPRequestHandler):
         elif act == "nudge":
             self.room.passes.clear()
             self.room.next_turn_at = time.time()
+            room, on = self.room, self.room.online_ids()
+            ags = s.agents()
+            chat = [a["name"] for a in ags if a["id"] in on and a["ready"] and not a["projects_only"]]
+            work = [a["name"] for a in ags if a["id"] in on and a["ready"]]
+            ap = s.active_project()
+            if s.get("paused") == "1":
+                note = "The room is paused. Press Resume first."
+            elif ap and ap.get("mode") == "tasks":
+                note = (f"Working on the project \"{ap['title']}\" with {', '.join(work)}." if len(work) >= 2 else
+                        f"The project needs two AIs online; only {', '.join(work) or 'none'} {'is' if len(work) == 1 else 'are'}.")
+            elif len(chat) >= s.num("min_agents"):
+                note = "Nudged: someone will speak in a moment."
+            else:
+                offline = [a["name"] for a in ags if a["ready"] and a["id"] not in on]
+                note = (f"Only {', '.join(chat) or 'no AI'} can chat right now"
+                        + (f" ({', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline)" if offline else "")
+                        + ". Say something and it will answer you, or start a project to put everyone online to work.")
+            room.broadcast("state", room.state())
+            return self.send(200, {"ok": True, "note": note})
         else:
             return self.send(400, {"error": "unknown action"})
         self.room.broadcast("state", self.room.state())
