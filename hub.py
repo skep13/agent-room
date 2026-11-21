@@ -310,6 +310,9 @@ class Store:
                             (json.dumps(sc), ",".join(earned_skills(sc)), r["id"]))
         self.db.execute("""UPDATE agents SET owner_id=(SELECT id FROM accounts WHERE accounts.agent_id=agents.id)
                            WHERE owner_id IS NULL""")
+        acols = {r["name"] for r in self.db.execute("PRAGMA table_info(accounts)")}
+        if "recovery_hash" not in acols:              # one-time code to reset a forgotten password
+            self.db.execute("ALTER TABLE accounts ADD COLUMN recovery_hash TEXT NOT NULL DEFAULT ''")
         pcols = {r["name"] for r in self.db.execute("PRAGMA table_info(projects)")}
         if "mode" not in pcols:                       # older projects were chat-only
             self.db.execute("ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'")
@@ -421,6 +424,11 @@ class Store:
         self.q("DELETE FROM sessions WHERE expires<?", (time.time(),))
         self.q("INSERT INTO sessions VALUES(?,?,?)", (h(tok), account_id, time.time() + SESSION_DAYS * 86400))
         return tok
+
+    def new_recovery(self, account_id):
+        raw = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(12))
+        self.q("UPDATE accounts SET recovery_hash=? WHERE id=?", (h(raw), account_id))
+        return f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
 
     def new_invite(self, agent_id, days=7):
         code = secrets.token_urlsafe(12)
@@ -585,6 +593,22 @@ class Room:
                 "online": [a["name"] for a in agents if a["id"] in on],
                 "speaking": speaking, "working": working, "today": self.s.agent_messages_today(),
                 "daily_limit": int(self.s.num("daily_limit"))}
+
+    def public(self):
+        on = self.online_ids()
+        agents = self.s.agents()
+        ap = self.s.active_project()
+        with self.job_lock:
+            busy = {self.s.agent(aid)["name"]: j["kind"] for aid, j in self.jobs.items() if self.s.agent(aid)}
+        speaking = self.turn["agent_name"] if self.turn and not self.reply.is_set() else None
+        homes = {a["owner_id"] for a in agents if a["owner_id"] is not None}
+        done = self.s.q("SELECT COUNT(*) c FROM projects WHERE status='done'").fetchone()["c"]
+        return {"agents": [{"name": a["name"], "color": a["color"], "online": a["id"] in on,
+                            "skills": a["skills"][:3] if a.get("tryout") == "done" else [],
+                            "doing": busy.get(a["name"]) or ("talking" if speaking == a["name"] else "")}
+                           for a in agents if a["ready"]],
+                "homes": len(homes), "project": ap["title"] if ap else None, "projects_done": done,
+                "paused": self.s.get("paused") == "1", "today": self.s.agent_messages_today()}
 
     def post(self, kind, author, text):
         text = text.strip()[: int(self.s.num("max_chars"))]
@@ -1315,9 +1339,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.send(403, {"error": "forbidden"})
         p = urlparse(self.path).path
-        if p in ("/", "/index.html"):
+        if p in ("/", "/home.html"):                 # the front page
+            with open(os.path.join(STATIC, "home.html"), "rb") as f:
+                return self.send(200, f.read(), "text/html; charset=utf-8")
+        if p in ("/room", "/room/", "/index.html"):
             with open(os.path.join(STATIC, "index.html"), "rb") as f:
                 return self.send(200, f.read(), "text/html; charset=utf-8")
+        if p == "/api/public":                        # what the front page shows: no chat, no secrets
+            return self.send(200, self.room.public())
         if p == "/healthz":
             return self.send(200, {"ok": True})
         if p == "/auth/handoff":
@@ -1328,10 +1357,10 @@ class Handler(BaseHTTPRequestHandler):
                     del self.handoffs[c]
                 hit = self.handoffs.pop(code, None) if code else None
             if not hit:
-                self.send_response(303); self.send_header("Location", "/"); self.send_header("Content-Length", "0")
+                self.send_response(303); self.send_header("Location", "/room"); self.send_header("Content-Length", "0")
                 return self.end_headers()
             self.send_response(303)
-            self.send_header("Location", "/")
+            self.send_header("Location", "/room")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Set-Cookie", self.session_cookie(self.room.s.new_session(hit[0]), SESSION_DAYS * 86400))
@@ -1378,7 +1407,9 @@ class Handler(BaseHTTPRequestHandler):
             me = None
             if role == "owner":
                 ag = self.room.s.agent(x["agent_id"])
+                has_rec = bool(self.room.s.q("SELECT recovery_hash FROM accounts WHERE id=?", (x["id"],)).fetchone()[0])
                 me = {"username": x["username"], "agent": ag, "agents": self.room.s.owned_agents(x["id"]),
+                      "has_recovery": has_rec,
                       "skills": SKILLS, "max_agents": MAX_AGENTS_PER_OWNER}
             return self.send(200, dict(self.room.state(), admin=role in ("owner", "admin"), me=me))
         if p == "/api/messages":
@@ -1412,7 +1443,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.send(403, {"error": "forbidden"})
         p = urlparse(self.path).path
-        if self.limiter.blocked(self.ip()) and p in ("/api/login", "/api/setup", "/api/invite-info", "/api/join"):
+        if self.limiter.blocked(self.ip()) and p in ("/api/login", "/api/setup", "/api/invite-info", "/api/join", "/api/reset"):
             return self.send(429, {"error": "too many attempts: try again in 15 minutes"})
         try:
             b = self.body()
@@ -1428,6 +1459,31 @@ class Handler(BaseHTTPRequestHandler):
             return self.invite_setup(b)
         if p == "/api/join":
             return self.join(b)
+        if p == "/api/reset":                       # forgot password: username + recovery code
+            user = str(b.get("username", "")).strip()
+            code = re.sub(r"[^A-Za-z0-9]", "", str(b.get("recovery", ""))).upper()
+            r = s.q("SELECT id, recovery_hash FROM accounts WHERE username=?", (user,)).fetchone()
+            if not r or not r["recovery_hash"] or len(code) != 12 or not hmac.compare_digest(h(code), r["recovery_hash"]):
+                return self.deny("that username and recovery code don't match")
+            pw = str(b.get("password", ""))
+            if len(pw) < 10:
+                return self.send(400, {"error": "password: at least 10 characters"})
+            s.q("UPDATE accounts SET pw_hash=? WHERE id=?", (hash_pw(pw), r["id"]))
+            s.q("DELETE FROM sessions WHERE account_id=?", (r["id"],))
+            new = s.new_recovery(r["id"])               # each code works once
+            return self.send(200, {"ok": True, "recovery": new},
+                             cookie=self.session_cookie(s.new_session(r["id"]), SESSION_DAYS * 86400))
+        if p == "/api/agent/reset-link":            # forgot password, proved from the AI's own server
+            role, x = self.who()
+            if role != "agent":
+                return self.deny("run this on the server where your AI's connector lives")
+            o = s.q("SELECT owner_id FROM agents WHERE id=?", (x["id"],)).fetchone()
+            acct = s.q("SELECT agent_id FROM accounts WHERE id=?", (o["owner_id"],)).fetchone() if o and o["owner_id"] else None
+            if not acct:
+                return self.send(400, {"error": "this AI has no owner account yet: use your sign-up link"})
+            code = s.new_invite(acct["agent_id"], 1)
+            hub = ("https://" if self.https() else "http://") + self.host()
+            return self.send(200, {"link": f"{hub}/room#invite={code}"})
         if p == "/api/invite-info":                # which AI an invite link is for
             inv = s.q("SELECT a.name FROM invites i JOIN agents a ON a.id=i.agent_id WHERE i.code_hash=? AND i.expires>?",
                       (h(str(b.get("code", "")).strip()), time.time())).fetchone()
@@ -1582,7 +1638,8 @@ class Handler(BaseHTTPRequestHandler):
                    (name, hash_pw(pw), aid, time.time())).lastrowid
         s.q("UPDATE agents SET owner_id=? WHERE id=?", (acct, aid))
         s.q("DELETE FROM invites WHERE agent_id=?", (aid,))
-        return self.send(200, {"ok": True}, cookie=self.session_cookie(s.new_session(acct), SESSION_DAYS * 86400))
+        return self.send(200, {"ok": True, "recovery": s.new_recovery(acct)},
+                         cookie=self.session_cookie(s.new_session(acct), SESSION_DAYS * 86400))
 
     def invite_setup(self, b):
         """Invite code -> choose a login (or reset a lost password)."""
@@ -1685,6 +1742,8 @@ class Handler(BaseHTTPRequestHandler):
             self.room.post("system", "room", f"{acct['username']} added a new AI: {name}")
             self.room.broadcast("state", self.room.state())
             return self.send(200, {"ok": True, "agent": s.agent(new)})
+        if p == "/api/me/recovery":                 # a fresh recovery code (the old one stops working)
+            return self.send(200, {"recovery": s.new_recovery(acct["id"])})
         if p == "/api/me/setup":                    # "connect your server": a one-time install command
             model_url, model = str(b.get("model_url", "")).strip(), str(b.get("model", "")).strip()
             if not re.fullmatch(r"https?://[^\s'\"\\`$]{3,200}", model_url):
@@ -1871,7 +1930,7 @@ def main():
             sys.exit("no such agent")
         code = s.new_invite(ag["id"], args.days)
         base = os.environ.get("AGENT_ROOM_PUBLIC_URL", "https://homelab.tail35b6c6.ts.net").rstrip("/")
-        print(f"{base}/#invite={code}")
+        print(f"{base}/room#invite={code}")
         print(f"(code: {code}, good for {args.days} days)")
     elif args.cmd == "rotate-agent":
         ag = s.agent_by_name(args.name)

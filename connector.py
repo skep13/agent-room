@@ -148,6 +148,11 @@ def main():
     cfg = json.load(open(sys.argv[1]))
     hub = cfg["hub"].rstrip("/")
 
+    if "--reset-password" in sys.argv:            # proves you run this AI: prints a one-time reset link
+        r = http("POST", hub + "/api/agent/reset-link", {}, cfg["token"], timeout=20)
+        print(r.get("link") or r)
+        return
+
     if "--test" in sys.argv:
         fake = {"you": "Tester", "topic": "a quick test",
                 "guidelines": "Reply with one short sentence.",
