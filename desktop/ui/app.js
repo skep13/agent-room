@@ -24,12 +24,29 @@ async function start() {
   $("m-version").textContent = "Agent Room " + st.version;
   renderStatus(st.status);
   T.event.listen("status", e => renderStatus(e.payload));
+  checkUpdate(); setInterval(checkUpdate, 6 * 3600 * 1000);
   if (!cfg.signed_in && !cfg.has_token) return openJoin();
   await refreshMe();
   if (cfg.signed_in && !me) return openJoin("Your sign-in has expired. Sign in again.");
   if (me && !me.agent.ready) return openProfile(true);
   openMain();
 }
+
+// Updates install themselves: the app fetches the new version, checks it's signed by us, and restarts.
+async function checkUpdate() {
+  try {
+    const u = await call("check_update");
+    if (!u) return;
+    $("m-update-text").textContent = `Version ${u.version} is ready.`;
+    $("m-update").hidden = false;
+  } catch (_) { /* offline or no release yet: try again later */ }
+}
+$("m-update-go").onclick = async () => {
+  $("m-update-go").disabled = true; $("m-update-go").textContent = "Updating…";
+  $("m-update-text").textContent = "Downloading the new version. The app restarts by itself; your AI rejoins the room.";
+  try { await call("install_update"); }
+  catch (e) { $("m-update-text").textContent = "The update didn't work: " + e; $("m-update-go").disabled = false; $("m-update-go").textContent = "Try again"; }
+};
 
 async function refreshMe() {
   try {
@@ -66,6 +83,8 @@ for (const b of document.querySelectorAll(".seg button")) b.onclick = () => {
   $("j-code-row").hidden = $("j-invite-hint").hidden = !inv;
   $("j-join-row").hidden = $("j-new-hint").hidden = !nu;
   $("j-code").required = inv; $("j-join").required = nu;
+  $("j-user").required = !inv;              // a reset keeps your username
+  $("j-forgot-row").hidden = joinMode !== "signin"; $("j-forgot-done").hidden = true;
   $("j-user-label").textContent = nu ? "Your AI's name" : "Username";
   $("j-pass").autocomplete = inv || nu ? "new-password" : "current-password";
   $("j-pass").minLength = inv || nu ? 10 : 0;
@@ -76,7 +95,14 @@ $("f-join").onsubmit = async e => {
   const go = $("j-go"); go.disabled = true; err($("j-err"));
   try {
     const args = { hub: $("j-hub").value, username: $("j-user").value, password: $("j-pass").value };
-    me = joinMode === "invite" ? await call("use_invite", { ...args, code: $("j-code").value })
+    // codes: accept the whole link, and spot a sign-up code typed in the invite box
+    let code = $("j-code").value.trim(); const m = code.match(/invite=([\w-]+)/); if (m) code = m[1];
+    const bare = code.replace(/[^A-Za-z0-9]/g, "");
+    if (joinMode === "invite" && bare.length === 8) {
+      if (!args.username) throw "That's the room's sign-up code. Choose \"I'm new\" and type your AI's name.";
+      me = await call("join_room", { hub: args.hub, code: bare, name: args.username, password: args.password });
+    } else
+    me = joinMode === "invite" ? await call("use_invite", { ...args, code })
        : joinMode === "new" ? await call("join_room", { hub: args.hub, code: $("j-join").value, name: args.username, password: args.password })
        : await call("sign_in", args);
     $("j-pass").value = ""; $("j-code").value = ""; $("j-join").value = "";
@@ -84,6 +110,12 @@ $("f-join").onsubmit = async e => {
     if (!me.agent.ready) openProfile(true); else openMain();
   } catch (x) { err($("j-err"), String(x)); }
   finally { go.disabled = false; }
+};
+
+$("j-forgot").onclick = async () => {
+  if (!$("j-hub").value || !$("j-user").value.trim()) { err($("j-err"), "Type the room address and your username first."); return; }
+  try { await call("request_reset", { hub: $("j-hub").value, username: $("j-user").value }); err($("j-err")); $("j-forgot-done").hidden = false; }
+  catch (x) { err($("j-err"), String(x)); }
 };
 
 // ---------------------------------------------------------------- profile

@@ -61,6 +61,9 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build
+        env:   # signs the update files so installed apps can trust them
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm ci
           npx tauri build ${{ matrix.args }}
@@ -79,6 +82,11 @@ jobs:
           put '*.rpm'        "AgentRoom-$v-linux-x86_64.rpm"
           put '*.AppImage'   "AgentRoom-$v-linux-x86_64.AppImage"
           put '*.dmg'        "AgentRoom-$v-macos.dmg"
+          # what the in-app updater downloads, and their signatures
+          put '*.app.tar.gz'      "AgentRoom-$v-macos.app.tar.gz"
+          put '*.app.tar.gz.sig'  "AgentRoom-$v-macos.app.tar.gz.sig"
+          put '*-setup.exe.sig'   "AgentRoom-$v-windows-setup.exe.sig"
+          put '*.AppImage.sig'    "AgentRoom-$v-linux-x86_64.AppImage.sig"
           ls -l $out
           [ -n "$(ls $out)" ]
 
@@ -99,3 +107,40 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --latest --title "Agent Room $v" --notes-file ../notes.md || true
           gh release upload "$tag" ../dist-out/* --clobber
+
+  # latest.json tells installed apps there's a new version and where to get it.
+  updates:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+          merge-multiple: true
+      - name: Publish latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF_NAME}"; v="${tag#v}"
+          base="https://github.com/${GH_REPO}/releases/download/$tag"
+          python3 - "$v" "$base" <<'PY'
+          import json, sys, datetime, os
+          v, base = sys.argv[1], sys.argv[2]
+          def entry(name):
+              sig = f"art/{name}.sig"
+              return {"signature": open(sig).read().strip(), "url": f"{base}/{name}"} if os.path.exists(sig) else None
+          plat = {}
+          mac = entry(f"AgentRoom-{v}-macos.app.tar.gz")
+          if mac: plat["darwin-aarch64"] = plat["darwin-x86_64"] = mac
+          win = entry(f"AgentRoom-{v}-windows-setup.exe")
+          if win: plat["windows-x86_64"] = win
+          lin = entry(f"AgentRoom-{v}-linux-x86_64.AppImage")
+          if lin: plat["linux-x86_64"] = lin
+          json.dump({"version": v, "notes": f"Room of AIs {v}",
+                     "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "platforms": plat}, open("latest.json", "w"), indent=2)
+          print(open("latest.json").read())
+          PY
+          gh release upload "$tag" latest.json --clobber

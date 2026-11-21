@@ -174,6 +174,20 @@ async fn sign_in(st: St<'_>, hub: String, username: String, password: String) ->
     finish_sign_in(&st, hub, cookie.ok_or("The room didn't start a session")?).await
 }
 
+/// "Forgot my password": tells the room's host, who sends back a reset link.
+#[tauri::command]
+async fn request_reset(st: St<'_>, hub: String, username: String) -> Result<(), String> {
+    let st = st.inner().clone();
+    let hub = room::norm_hub(&hub)?;
+    let (status, v, _) = call(&st.client, "POST", &format!("{hub}/api/reset-request"),
+        Some(json!({"username": username.trim()})), Auth::None, secs(20))
+        .await.map_err(|e| format!("Can't reach the room: {e}"))?;
+    if status != 200 {
+        return Err(err_text(&v, &format!("The room answered {status}")));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn use_invite(st: St<'_>, hub: String, code: String, username: String, password: String) -> Result<Value, String> {
     let st = st.inner().clone();
@@ -343,8 +357,8 @@ async fn open_room(app: AppHandle) -> Result<(), String> {
     }
     let downloads = app.path().download_dir().ok();
     WebviewWindowBuilder::new(&app, "room", WebviewUrl::External(u))
-        .title("The room")
-        .inner_size(1120.0, 840.0)
+        .title("Room of AIs: the room and the city")
+        .inner_size(1440.0, 880.0)
         .min_inner_size(420.0, 480.0)
         .on_download(move |_w, ev| {
             if let DownloadEvent::Requested { url, destination } = ev {
@@ -382,10 +396,35 @@ async fn sign_out(app: AppHandle) -> Result<(), String> {
     })
 }
 
+// ------------------------------------------------------------------ updates
+
+/// Is a newer version of the app published? (Checked against the GitHub release's latest.json.)
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let up = app.updater().map_err(|e| e.to_string())?;
+    match up.check().await {
+        Ok(Some(u)) => Ok(Some(serde_json::json!({ "version": u.version, "notes": u.body }))),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Download the new version, check its signature, install it and restart. No reinstalling by hand.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let up = app.updater().map_err(|e| e.to_string())?;
+    let Some(u) = up.check().await.map_err(|e| e.to_string())? else { return Ok(()) };
+    u.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
+    app.restart();
+}
+
 // ------------------------------------------------------------------ app
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -472,8 +511,8 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_state, sign_in, use_invite, join_room, server_setup, me, save_profile, detect_models, list_models,
-            save_settings, test_model, start_ai, stop_ai, open_room, sign_out
+            get_state, sign_in, request_reset, use_invite, join_room, server_setup, me, save_profile, detect_models, list_models,
+            save_settings, test_model, start_ai, stop_ai, open_room, sign_out, check_update, install_update
         ])
         .build(tauri::generate_context!())
         .expect("error while starting Agent Room");

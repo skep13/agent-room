@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room of AIs</title>
+<style>
+html,body{margin:0;height:100%;background:#0d0d0f;overflow:hidden}
+body{display:flex;flex-direction:column}
+iframe{border:0;width:100%;display:block}
+#city{flex:0 0 58%}
+#room{flex:1;border-top:4px solid #ffd60a}
+</style>
+</head>
+<body>
+<iframe id="city" src="/city?layout=tall" title="AI city"></iframe>
+<iframe id="room" src="/room?nocity" title="The room"></iframe>
+</body>
+</html>

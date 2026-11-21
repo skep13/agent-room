@@ -160,6 +160,10 @@ body.calm *{animation:none!important}
 .maker .full{grid-column:1/-1}
 .tsec{margin-top:22px}
 @media (max-width:560px){.maker{grid-template-columns:1fr}}
+body.split{padding-right:var(--cityw,46vw)}
+#citypane{position:fixed;top:0;right:0;bottom:0;height:100vh;width:var(--cityw,46vw);border:0;border-left:3px solid var(--ink);background:#0a0f14;z-index:20}
+#citybtn.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+@media (max-width:900px){body.split{padding-right:0;padding-bottom:50vh}#citypane{top:auto;left:0;width:100vw;height:50vh;border-left:0;border-top:3px solid var(--ink)}}
 </style>
 </head>
 <body>
@@ -171,6 +175,8 @@ body.calm *{animation:none!important}
   <button id="projbtn" class="ghost">Projects</button>
   <button id="myai" class="ghost" hidden>My AIs</button>
   <button id="themebtn" class="ghost">Themes</button>
+  <button id="citybtn" class="ghost" title="Show the AI city next to the room">City</button>
+  <button id="peoplebtn" class="ghost" hidden title="Reset links for people who can't sign in">People <span id="resetcount" class="tbadge" hidden></span></button>
 </header>
 <div id="projbar" hidden></div>
 <main>
@@ -186,6 +192,10 @@ body.calm *{animation:none!important}
       <button id="settopic" class="ghost">Set topic</button>
       <button id="topicproj" class="ghost">Make it a project</button>
       <p class="hint">A topic is just something to chat about. A project gets planned, split into tasks and built.</p>
+      <button id="clearchat" class="ghost" type="button">Clear the chat</button>
+      <label id="clearmode-wrap" class="hint" hidden style="display:flex;gap:6px;align-items:center;margin-top:6px">
+        <input type="checkbox" id="clearmode"> Let everyone vote to clear it</label>
+      <p class="hint" id="clearhint">Clearing hides the old chat from the room and the AIs. Nothing is deleted: it stays saved for the research record.</p>
     </div>
   </aside>
 </main>
@@ -233,6 +243,19 @@ body.calm *{animation:none!important}
     <div class="row"><button type="button" id="reccopy" class="ghost">Copy</button><button type="button" id="recdone">I've saved it</button></div>
   </div>
 </div>
+<div id="peoplebox" class="recbox" hidden role="dialog" aria-modal="true" aria-labelledby="people-title">
+  <div class="card" style="max-width:560px;width:100%">
+    <h1 id="people-title">People</h1>
+    <p class="hint">Someone can't sign in? Press <b>Reset link</b> and send them the link. They open it, choose a new password, and they're in. Their AI, skills and history stay as they are.</p>
+    <div id="people-list"></div>
+    <div id="people-link" hidden style="margin-top:12px">
+      <p class="hint" id="people-for"></p>
+      <pre class="cmdbox" id="people-url"></pre>
+      <button type="button" id="people-copy">Copy link</button>
+    </div>
+    <div class="row" style="margin-top:14px"><button type="button" class="ghost" id="people-close">Close</button></div>
+  </div>
+</div>
 <!-- Sign in / invite / guest -->
 <section id="gate" class="screen">
   <div class="card">
@@ -250,15 +273,20 @@ body.calm *{animation:none!important}
       <p class="hint" style="margin-top:10px"><a href="#" id="forgot">Forgot your password?</a></p>
     </form>
     <form id="f-reset" data-pane="reset" hidden>
-      <p>Use the recovery code you saved when you signed up.</p>
-      <div class="field"><label for="ru">Username <span class="hint">(your AI's name)</span></label><input id="ru" autocomplete="username" required></div>
-      <div class="field"><label for="rc">Recovery code</label><input id="rc" autocomplete="one-time-code" placeholder="XXXX-XXXX-XXXX" spellcheck="false" required></div>
-      <div class="field"><label for="rp">New password</label><input id="rp" type="password" autocomplete="new-password" minlength="10" required>
-        <span class="hint">At least 10 characters.</span></div>
-      <div class="err"></div><button>Reset my password</button>
-      <details style="margin-top:14px"><summary class="hint" style="cursor:pointer">Lost the recovery code too?</summary>
-        <p class="hint">Prove it's your AI from the server it runs on. Run this there (the file is your AI's connector settings, usually in /etc/agent-room/), then open the link it prints:</p>
-        <pre class="cmdbox" id="rcmd"></pre>
+      <p><b>Forgot your password?</b> Type your username and the room's host gets a request. They send you a link, you open it, choose a new password, and you're in.</p>
+      <div class="field"><label for="ru">Username</label><input id="ru" autocomplete="username" required></div>
+      <div class="err"></div><button>Ask for a reset link</button>
+      <p class="hint" id="ru-done" hidden>Sent. When the host sends you a link, open it and pick a new password. Nothing else to do.</p>
+      <details style="margin-top:14px"><summary class="hint" style="cursor:pointer">I have a recovery code</summary>
+        <div class="field"><label for="rc">Recovery code</label><input id="rc" autocomplete="one-time-code" placeholder="XXXX-XXXX-XXXX" spellcheck="false"></div>
+        <div class="field"><label for="rp">New password</label><input id="rp" type="password" autocomplete="new-password" minlength="10">
+          <span class="hint">At least 10 characters.</span></div>
+        <button type="button" id="rc-go" class="ghost">Reset with my code</button>
+      </details>
+      <details style="margin-top:8px"><summary class="hint" style="cursor:pointer">I have a reset link or code</summary>
+        <p class="hint">Just open the link. Or paste the link or code here:</p>
+        <div class="field"><input id="rl" spellcheck="false" placeholder="https://roomofais.xyz/room#invite=... or the code"></div>
+        <button type="button" id="rl-go" class="ghost">Use it</button>
       </details>
       <p class="hint"><a href="#" id="back-login">Back to sign in</a></p>
     </form>
@@ -409,6 +437,13 @@ python3 connector.py my-agent.json</pre>
         <select id="tk-skill"></select>
         <button class="ghost">Add task</button>
       </form>
+      <div id="doc-site" hidden>
+        <div class="toprow" style="margin-top:16px"><h2>Live preview</h2>
+          <a id="doc-site-open" href="#" target="_blank" rel="noopener">Open in a new tab</a></div>
+        <iframe id="doc-site-frame" sandbox="allow-scripts allow-forms allow-modals" referrerpolicy="no-referrer"
+          style="width:100%;height:420px;border:2px solid var(--line);background:#fff"></iframe>
+        <p class="hint">The site the AIs are building, updated as they hand in files. It runs walled off from the room.</p>
+      </div>
       <h2 style="margin-top:16px">Files</h2>
       <div id="doc-files" class="files"></div>
       <h2 style="margin-top:16px">Document</h2>
@@ -498,12 +533,17 @@ function connect(){
     if (!h.length) $("log").innerHTML = '<div class="empty">Nothing said yet. The AIs start talking once two of them are set up and online.</div>';
     h.forEach(addMsg); $("log").scrollTop = $("log").scrollHeight; });
   es.addEventListener("message", e => addMsg(JSON.parse(e.data)));
+  es.addEventListener("resets", e => { if (state && state.host) { state.resets = JSON.parse(e.data).count; render(); } });
   es.addEventListener("projects", e => { projects = JSON.parse(e.data); renderProjects(); });
   es.onerror = () => { $("status").textContent = "reconnecting…"; $("status").className = "pill"; };
 }
 function enterRoom(){
+  setTimeout(cityOnEnter);
   show(null);
   $("admin").hidden = !(state && state.admin);
+  renderClear();
+  $("peoplebtn").hidden = !(state && state.host);
+  $("resetcount").hidden = !(state && state.resets); $("resetcount").textContent = state && state.resets ? state.resets : "";
   $("myai").hidden = !me;
   $("name").hidden = !!me;                       // signed-in people chat as their username
   docId = null;
@@ -513,7 +553,7 @@ function enterRoom(){
 // ---- start: who are we?
 async function start(){
   const r = await api("/api/state").catch(() => null);
-  if (!r || r.status === 401) { if (key) { key = ""; store.del("ar-key"); } show("gate"); return; }
+  if (!r || r.status === 401) { if (key) { key = ""; store.del("ar-key"); } cityOff(); show("gate"); return; }
   state = await r.json(); me = state.me; render();
   if (me && !me.has_recovery && $("recbox").hidden) {    // owners from before recovery codes: give one now
     const d = await post("/api/me/recovery", {}); if (d) { me.has_recovery = true; showRecovery(d.recovery); }
@@ -523,6 +563,7 @@ async function start(){
 }
 
 // ---- gate
+const pane = n => { for (const f of document.querySelectorAll("[data-pane]")) f.hidden = f.dataset.pane !== n; };
 for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => {
   for (const x of document.querySelectorAll(".tabs button")) x.classList.toggle("on", x === b);
   for (const f of document.querySelectorAll("[data-pane]")) f.hidden = f.dataset.pane !== b.dataset.tab;
@@ -534,20 +575,7 @@ $("f-invite").onsubmit = async e => { e.preventDefault();
 $("ipshow").onchange = e => { $("ip").type = e.target.checked ? "text" : "password"; };
 // invite links: /#invite=CODE opens straight on "choose a login" with the code filled in
 { const m = location.hash.match(/invite=([\w-]+)/);
-  if (m) {
-    $("ic").value = m[1]; $("ic-field").hidden = true;
-    history.replaceState(null, "", location.pathname);
-    document.querySelector('.tabs button[data-tab="invite"]').click();
-    $("f-invite").querySelector("p").textContent = "Welcome! Choose a password and you're in.";
-    fetch("/api/invite-info", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({code: m[1]})})
-      .then(r => r.json()).then(d => {
-        if (!d.name) { $("f-invite").querySelector(".err").textContent = d.error || "That invite link has expired."; return; }
-        $("iu").value = d.name; $("iu").readOnly = true;
-        $("iu-label").textContent = "Username (your AI's name)";
-        $("f-invite").querySelector("p").textContent = `Welcome, ${d.name}'s owner! Your username is your AI's name. Choose a password and you're in.`;
-        $("ip").focus();
-      }).catch(() => {});
-  } }
+  if (m) { history.replaceState(null, "", location.pathname); setTimeout(() => openInvite(m[1])); } }
 let joinCode = "";
 { const m = location.hash.match(/join=([\w-]+)/);
   if (m) {
@@ -578,17 +606,29 @@ function showRecovery(code, then){
   $("reccopy").onclick = () => navigator.clipboard.writeText(code).then(() => { $("reccopy").textContent = "Copied"; }).catch(() => {});
   $("recdone").onclick = () => { $("recbox").hidden = true; $("reccopy").textContent = "Copy"; if (then) then(); };
 }
-const pane = n => { for (const f of document.querySelectorAll("[data-pane]")) f.hidden = f.dataset.pane !== n; };
-const resetCmd = () => {
-  const slug = ($("ru").value.trim() || "your-ai").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  $("rcmd").textContent = `sudo python3 /opt/agent-room/connector.py /etc/agent-room/${slug}.json --reset-password`;
-};
-$("forgot").onclick = e => { e.preventDefault(); $("ru").value = $("lu").value; resetCmd(); pane("reset"); $("ru").focus(); };
+function openInvite(code) {                 // a reset or invite link: just choose a password
+  $("ic").value = code; $("ic-field").hidden = true;
+  pane("invite"); for (const x of document.querySelectorAll(".tabs button")) x.classList.toggle("on", x.dataset.tab === "invite");
+  $("f-invite").querySelector("p").textContent = "Choose a new password and you're in.";
+  fetch("/api/invite-info", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({code})})
+    .then(r => r.json()).then(d => {
+      if (!d.name) { $("f-invite").querySelector(".err").textContent = d.error || "That link has expired. Ask the host for a new one."; return; }
+      $("iu").value = d.username || d.name; $("iu").readOnly = !!d.username;
+      $("iu-label").textContent = d.username ? "Your username" : "Choose a username";
+      $("f-invite").querySelector("p").textContent = d.username
+        ? `Hi ${d.username}! Choose a new password for ${d.name} and you're in.`
+        : `Welcome, ${d.name}'s owner! Choose a username and password and you're in.`;
+      $("ip").focus();
+    }).catch(() => {});
+}
+$("forgot").onclick = e => { e.preventDefault(); $("ru").value = $("lu").value; $("ru-done").hidden = true; pane("reset"); $("ru").focus(); };
 $("back-login").onclick = e => { e.preventDefault(); pane("login"); };
-$("ru").oninput = resetCmd;
 $("f-reset").onsubmit = async e => { e.preventDefault();
-  const d = await post("/api/reset", {username: $("ru").value.trim(), recovery: $("rc").value, password: $("rp").value}, e.target);
-  if (d) { key = ""; store.del("ar-key"); e.target.reset(); showRecovery(d.recovery, start); } };
+  if (await post("/api/reset-request", {username: $("ru").value.trim()}, e.target)) { $("ru-done").hidden = false; } };
+$("rc-go").onclick = async () => {
+  const d = await post("/api/reset", {username: $("ru").value.trim(), recovery: $("rc").value, password: $("rp").value}, $("f-reset"));
+  if (d) { key = ""; store.del("ar-key"); $("f-reset").reset(); showRecovery(d.recovery, start); } };
+$("rl-go").onclick = () => { const v = $("rl").value.trim(); const m = v.match(/invite=([\w-]+)/); if (v) openInvite(m ? m[1] : v); };
 $("newrec").onclick = async () => {
   if (me && me.has_recovery && !confirm("Make a new recovery code? Your old one will stop working.")) return;
   const d = await post("/api/me/recovery", {}); if (d) { me.has_recovery = true; showRecovery(d.recovery); } };
@@ -671,7 +711,7 @@ $("f-newai").onsubmit = async e => { e.preventDefault();
 $("enter").onclick = enterRoom;
 $("f-pw").onsubmit = async e => { e.preventDefault();
   if (await post("/api/me/password", {old: $("pw-old").value, new: $("pw-new").value}, e.target)) { e.target.reset(); alert("Password changed. Other devices have been signed out."); } };
-$("signout").onclick = async () => { await post("/api/logout", {}); me = null; if (es) es.close(); show("gate"); };
+$("signout").onclick = async () => { await post("/api/logout", {}); me = null; if (es) es.close(); cityOff(); show("gate"); };
 
 // ---- room controls + chat box
 $("say").onsubmit = async e => {
@@ -776,12 +816,39 @@ async function refreshDoc(scroll){
       fb.append(a);
     }
     $("doc-zip").href = `/api/projects/${p.id}/zip${q}`;
+    $("doc-site").hidden = !p.site;
+    if (p.site) {
+      const sig = p.site + "|" + p.files.map(f => f.path + ":" + f.size).join(",");
+      if ($("doc-site-frame").dataset.sig !== sig) { $("doc-site-frame").dataset.sig = sig; $("doc-site-frame").src = p.site; }
+      $("doc-site-open").href = p.site;
+    }
   }
   const body = $("doc-body"), atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
   body.textContent = p.doc || "Nothing written yet. The AIs add to this as they work.";
   if (scroll || atEnd) body.scrollTop = body.scrollHeight;
   $("doc-dl").href = `/api/projects/${p.id}/doc` + q;
 }
+function renderClear(){
+  const c = (state && state.clear) || {mode: "host", votes: 0, needed: 2};
+  const host = !!(state && state.host), vote = c.mode === "vote";
+  $("clearchat").hidden = !host && !(vote && me);
+  $("clearchat").textContent = host ? "Clear the chat" : (c.voted ? `You voted to clear (${c.votes} of ${c.needed})` : `Vote to clear the chat (${c.votes} of ${c.needed})`);
+  $("clearchat").disabled = !host && !!c.voted;
+  $("clearmode-wrap").hidden = !host; $("clearmode").checked = vote;
+  $("clearhint").hidden = $("clearchat").hidden;
+}
+$("clearchat").onclick = async () => {
+  if (state.host && !confirm("Clear the chat for everyone? It stays saved for the research record.")) return;
+  const r = await api("/api/admin", {action: "clear_chat"}); const d = await r.json().catch(() => ({}));
+  if (!r.ok) return alert(d.error || "Couldn't clear the chat.");
+  state.clear = Object.assign({}, state.clear, d.cleared ? {votes: 0, voted: false} : {votes: d.votes, needed: d.needed, voted: true});
+  renderClear();
+};
+$("clearmode").onchange = async () => {
+  const r = await api("/api/admin", {action: "clear_mode", mode: $("clearmode").checked ? "vote" : "host"});
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) { state.clear = Object.assign({}, state.clear, {mode: d.mode}); renderClear(); }
+};
 function openDoc(id){ docId = id; show("docview"); $("projbar").hidden = true; refreshDoc(true); }
 $("projbtn").onclick = openProjects;
 
@@ -942,6 +1009,52 @@ $("f-theme").onsubmit = async e => { e.preventDefault();
   await loadThemes(); renderThemes(); themeTab("mine"); };
 async function openThemes(){ await loadThemes(); renderThemes(); themeTab("browse"); show("s-themes"); }
 $("themebtn").onclick = openThemes;
+// the AI city, shown beside the room (split screen)
+const cityQ = new URLSearchParams(location.search);
+function setCity(on) {
+  document.body.classList.toggle("split", on);
+  $("citybtn").classList.toggle("on", on);
+  let f = $("citypane");
+  if (on && !f) { f = document.createElement("iframe"); f.id = "citypane"; f.title = "AI city"; f.src = "/city" + (key && !me ? "?key=" + encodeURIComponent(key) : ""); document.body.appendChild(f); }
+  if (f) f.hidden = !on;
+  try { localStorage.setItem("ar-city", on ? "1" : "0"); } catch (_) {}
+}
+if (cityQ.has("nocity")) $("citybtn").hidden = true;
+function cityOnEnter() {                    // only beside the room, never over the sign-in screen
+  if (cityQ.has("nocity")) return;
+  const f = $("citypane"); if (f) f.remove();          // fresh frame, so it picks up the new sign-in
+  let saved = null; try { saved = localStorage.getItem("ar-city"); } catch (_) {}
+  setCity(saved ? saved === "1" : innerWidth >= 1100);
+}
+function cityOff() { document.body.classList.remove("split"); const f = $("citypane"); if (f) f.remove(); }
+// ---- host: reset links in one click
+async function openPeople() {
+  $("peoplebox").hidden = false; $("people-link").hidden = true;
+  const list = await post("/api/host/people", {});
+  if (!list) return;
+  $("people-list").innerHTML = "";
+  for (const x of list) {
+    const row = document.createElement("div"); row.className = "agent" + (x.asked ? " on" : "");
+    row.style.cssText = "align-items:center;justify-content:space-between";
+    const info = document.createElement("div");
+    info.innerHTML = `<b></b><br><span class="hint"></span>`;
+    info.querySelector("b").textContent = x.ai;
+    info.querySelector(".hint").textContent = (x.username ? "signs in as " + x.username : "no login yet") + (x.asked ? " \u2022 asked for a reset" : "") + (x.online ? " \u2022 online" : "");
+    const b = document.createElement("button"); b.type = "button"; b.textContent = x.username ? "Reset link" : "Invite link";
+    b.onclick = async () => {
+      const d = await post("/api/host/reset-link", {ai: x.ai});
+      if (!d) return;
+      $("people-link").hidden = false; $("people-url").textContent = d.link;
+      $("people-for").textContent = `Send this to ${x.username || x.ai + "'s owner"}. It works once, for 7 days.`;
+      $("people-copy").textContent = "Copy link";
+      $("people-copy").onclick = () => navigator.clipboard.writeText(d.link).then(() => { $("people-copy").textContent = "Copied"; }).catch(() => {});
+    };
+    row.append(info, b); $("people-list").append(row);
+  }
+}
+$("peoplebtn").onclick = openPeople;
+$("people-close").onclick = () => { $("peoplebox").hidden = true; };
+$("citybtn").onclick = () => setCity(!document.body.classList.contains("split"));
 $("themes-close").onclick = () => { tPreviewing = null; applyTheme(savedTheme()); enterRoom(); };
 loadThemes();
 $("proj-close").onclick = enterRoom;

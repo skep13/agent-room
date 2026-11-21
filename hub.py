@@ -42,6 +42,7 @@ DEFAULTS = {
     "paused": "0",
     "pace_seconds": "45",        # gap between AI messages
     "turn_timeout": "600",       # how long a home model gets to answer
+    "hosts": "",                 # who can make reset links for others (comma-separated usernames; empty = the first account)
     "theme_mods": "",            # who approves themes (comma-separated usernames; empty = the first account)
     "idle_seconds": "1800",      # after everyone passes, wait this long
     "daily_limit": "400",        # AI messages per UTC day, across the room
@@ -57,7 +58,10 @@ DEFAULTS = {
     "file_max_chars": "100000",  # largest single project file
     "files_max_total": "1000000",# all files in one project
     "task_context_chars": "24000",  # how much of the project's files a worker sees
+    "auto_project_after": "8",
+    "chat_clear": "host",        # who can clear the chat: "host" (a button for the room's host) or "vote" (owners vote; the host can still clear)   # a "make/build ..." topic becomes a project after this many AI chat messages (0 = never)
 }
+BUILD_TOPIC = re.compile(r"\b(make|build|create|write|design|code|develop|draft|program|set up|put together)\b", re.I)
 SKILLS = ["planning", "coding", "writing", "research", "review", "design", "chat"]
 MAX_AGENTS_PER_OWNER = 4
 PROJECT_GUIDE = (
@@ -75,8 +79,10 @@ GUIDELINES = (
     "You are {name}, one of several AIs in a shared group chat. Each AI here "
     "is run by a different person on their own computer at home, and those "
     "people may drop in. Talk naturally with the others: respond to what was "
-    "actually said, ask questions, disagree when you disagree, change the "
-    "subject when it runs dry. Keep messages short (1-4 sentences) unless "
+    "actually said, disagree when you disagree, change the subject when it "
+    "runs dry. When the group is choosing between options, pick one and say "
+    "why instead of handing the choice back; don't end every message with a "
+    "question. Keep messages short (1-4 sentences) unless "
     "someone asks for more. Write only your own message: don't prefix it "
     "with your name and don't speak for anyone else. If you have nothing "
     "worth adding right now, reply with exactly PASS."
@@ -219,6 +225,18 @@ TRYOUT_TASKS = {
         "Suggest a colour palette (5 colours as hex codes, with what each is used for) and a font pairing for a calm meditation app, with one sentence of reasoning.",
     ],
 }
+COMPACT_GUIDE = (
+    "You are {name}, keeping a group project's notes short enough to work from. Summarise the "
+    "project document below so the other AIs can carry on without reading all of it. Keep every "
+    "decision, name, file name, colour, tool, page and open question; drop repetition and wording. "
+    "At most about 2,500 characters. Put the summary between [doc] and [/doc]."
+)
+MIME = {".html": "text/html", ".htm": "text/html", ".css": "text/css", ".js": "text/javascript",
+        ".mjs": "text/javascript", ".json": "application/json", ".svg": "image/svg+xml",
+        ".txt": "text/plain", ".md": "text/plain", ".xml": "application/xml", ".csv": "text/plain"}
+# AI-written pages run in a sandbox with their own throwaway origin: no access to the room's cookies or pages.
+SITE_CSP = ("sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self' https: data: blob: "
+            "'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'")
 TRYOUT_GUIDE = (
     "You are {name}, new to a shared room of AIs. Before you join in, everyone does a short tryout so "
     "the room knows what you're good at and can hand you the right work. Answer each challenge as well "
@@ -263,6 +281,23 @@ REVIEW_GUIDE = (
     "a short, specific list of what must be fixed. Don't rewrite the work yourself."
 )
 
+def inv_norm(code):
+    """Invite codes ignore case, spaces and dashes, so a retyped code still works."""
+    return re.sub(r"[^A-Za-z0-9]", "", str(code)).upper()
+
+
+def inv_code(code):
+    """The code itself, even when someone pastes the whole invite link."""
+    raw = str(code).strip()
+    m = re.search(r"invite=([A-Za-z0-9_-]+)", raw)
+    return m.group(1) if m else raw
+
+
+def inv_hashes(code):
+    raw = inv_code(code)
+    return (h(raw), h(inv_norm(raw)))
+
+
 def h(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -297,6 +332,7 @@ class Store:
                 pw_hash TEXT NOT NULL, agent_id INTEGER UNIQUE NOT NULL, created REAL);
             CREATE TABLE IF NOT EXISTS sessions (
                 token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL, expires REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS reset_requests (agent_id INTEGER PRIMARY KEY, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS invites (
                 code_hash TEXT PRIMARY KEY, agent_id INTEGER NOT NULL, expires REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS projects (
@@ -347,6 +383,10 @@ class Store:
                             (json.dumps(sc), ",".join(earned_skills(sc)), r["id"]))
         self.db.execute("""UPDATE agents SET owner_id=(SELECT id FROM accounts WHERE accounts.agent_id=agents.id)
                            WHERE owner_id IS NULL""")
+        pcols = {r["name"] for r in self.db.execute("PRAGMA table_info(projects)")}
+        if "summary" not in pcols:                    # compacted notes on a long project document
+            self.db.execute("ALTER TABLE projects ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+            self.db.execute("ALTER TABLE projects ADD COLUMN summary_upto INTEGER NOT NULL DEFAULT 0")
         acols = {r["name"] for r in self.db.execute("PRAGMA table_info(accounts)")}
         if "recovery_hash" not in acols:              # one-time code to reset a forgotten password
             self.db.execute("ALTER TABLE accounts ADD COLUMN recovery_hash TEXT NOT NULL DEFAULT ''")
@@ -470,15 +510,15 @@ class Store:
         return f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
 
     def new_invite(self, agent_id, days=7):
-        code = secrets.token_urlsafe(12)
+        code = secrets.token_hex(8).upper()
         self.q("DELETE FROM invites WHERE agent_id=?", (agent_id,))
-        self.q("INSERT INTO invites VALUES(?,?,?)", (h(code), agent_id, time.time() + days * 86400))
+        self.q("INSERT INTO invites VALUES(?,?,?)", (h(inv_norm(code)), agent_id, time.time() + days * 86400))
         return code
 
     # ---- projects
     def project(self, pid, with_doc=True):
         cols = "*" if with_doc else ("id,title,brief,status,created_by,created,started,finished,"
-                                     "turns,done_votes,outcome,mode,length(doc) AS doc_chars")
+                                     "turns,done_votes,outcome,mode,length(doc) AS doc_chars,summary_upto")
         r = self.q(f"SELECT {cols} FROM projects WHERE id=?", (pid,)).fetchone()
         if not r:
             return None
@@ -575,7 +615,8 @@ class Store:
         return {"id": cur.lastrowid, "kind": kind, "author": author, "text": text, "ts": ts}
 
     def recent(self, n):
-        rows = self.q("SELECT * FROM messages ORDER BY id DESC LIMIT ?", (int(n),)).fetchall()
+        rows = self.q("SELECT * FROM messages WHERE ts>? ORDER BY id DESC LIMIT ?",
+                      (float(self.get("chat_cleared_at") or 0), int(n))).fetchall()
         return [dict(r) for r in reversed(rows)]
 
     def agent_messages_today(self):
@@ -601,7 +642,10 @@ class Room:
         self.job_lock = threading.Lock()
         self.last_worked = {}        # agent id -> when it last got a task
         self.plan_tries = {}         # project id -> failed plans
+        self.compact_tries = {}      # project id -> failed compactions
+        self.clear_votes = {}        # account id -> when they voted to clear the chat
         self.review_declined = {}    # task id -> agents who passed on reviewing it
+        self.city = None             # the AI city (city.py), kept apart from the room
         for a in self.s.agents():    # jobs live in memory: a restart re-queues half-done tryouts
             st = self.s.tryout_of(a["id"]).get("state")
             if st in ("asked", "grading"):
@@ -615,6 +659,44 @@ class Room:
                     w.put_nowait((event, data))
                 except queue.Full:
                     self.watchers.remove(w)
+
+    def site_token(self, pid):
+        key = self.s.get("site_secret")
+        if not key:
+            key = secrets.token_hex(16)
+            self.s.set("site_secret", key)
+        return hmac.new(key.encode(), f"site:{pid}".encode(), hashlib.sha256).hexdigest()[:24]
+
+    def site_link(self, p):
+        """Where a web project can be opened live, if it has a page."""
+        pages = [f["path"] for f in p.get("files") or [] if f["path"].lower().endswith((".html", ".htm"))]
+        if not pages:
+            return None
+        page = next((x for x in pages if posixpath.basename(x).lower() == "index.html"), pages[0])
+        return f"/site/{p['id']}/{self.site_token(p['id'])}/{page}"
+
+    def clear_chat(self, who):
+        self.s.set("chat_cleared_at", str(time.time()))
+        self.clear_votes.clear()
+        self.passes.clear()
+        self.post("system", "room", f"The chat was cleared by {who}. (Nothing is deleted: the full history is kept for the research record.)")
+        self.broadcast("history", self.s.recent(200))
+
+    def clear_needed(self):
+        n = self.s.q("SELECT COUNT(*) c FROM accounts").fetchone()["c"]
+        return max(1, min(n, max(2, -(-n // 2))))   # half the owners, at least two (or everyone if fewer)
+
+    def vote_clear(self, acct):
+        now = time.time()
+        for k in [k for k, t in self.clear_votes.items() if now - t > 1800]:   # votes last 30 minutes
+            del self.clear_votes[k]
+        self.clear_votes[acct["id"]] = now
+        need = self.clear_needed()
+        if len(self.clear_votes) >= need:
+            self.clear_chat("a vote")
+            return True, need
+        self.post("system", "room", f"{acct['username']} voted to clear the chat ({len(self.clear_votes)} of {need} votes)")
+        return False, need
 
     def online_ids(self):
         now = time.time()
@@ -672,6 +754,8 @@ class Room:
         return turn
 
     def answer(self, agent, turn_id, text, passed):
+        if self.city and self.city.take(agent, turn_id, text, passed):
+            return True
         with self.job_lock:
             job = self.jobs.get(agent["id"])
             if job and job["turn"]["id"] == turn_id:
@@ -821,14 +905,92 @@ class Room:
                 out.append(block)
                 used += len(block)
             else:
-                listed.append(f"{f['path']} ({len(f['content']):,} characters, not shown)")
+                listed.append(self.outline(f["path"], f["content"]))
         if listed:
-            out.append("Other files: " + ", ".join(listed))
+            out.append("Other files:\n" + "\n\n".join(listed))
         return "\n\n".join(out) or "(no files yet)"
+
+    def chat_before(self, p, n=16, cap=3000):
+        """The chat leading up to a project, so the plan keeps what the AIs already agreed."""
+        rows = self.s.q("""SELECT author, text FROM messages WHERE kind IN ('agent','human') AND ts<?
+                           AND ts>? ORDER BY id DESC LIMIT ?""",
+                         (p["started"] or p["created"], float(self.s.get("chat_cleared_at") or 0), n)).fetchall()
+        out, used = [], 0
+        for r in rows:                                   # newest first, keep what fits
+            line = f"{r['author']}: {r['text'][:400]}"
+            if used + len(line) > cap:
+                break
+            out.append(line)
+            used += len(line)
+        return "\n".join(reversed(out))
+
+    def maybe_auto_project(self):
+        """A chat topic that asks them to make something turns into a project after a short chat,
+        so they stop talking about it and start doing it. Once per topic."""
+        after = int(self.s.num("auto_project_after"))
+        topic = (self.s.get("topic") or "").strip()
+        if after <= 0 or not BUILD_TOPIC.search(topic) or self.s.get("auto_project_topic") == topic:
+            return False
+        if self.s.q("SELECT 1 FROM projects WHERE status IN ('active','queued')").fetchone():
+            return False
+        since = self.s.q("""SELECT MAX(t) m FROM (
+                              SELECT MAX(ts) t FROM messages WHERE kind='system' AND text LIKE 'New topic:%'
+                              UNION ALL SELECT MAX(COALESCE(finished, created)) FROM projects)""").fetchone()["m"] or 0
+        n = self.s.q("SELECT COUNT(*) c FROM messages WHERE kind='agent' AND ts>?", (since,)).fetchone()["c"]
+        if n < after:
+            return False
+        self.s.set("auto_project_topic", topic)
+        title = topic if len(topic) <= 80 else topic[:77].rsplit(" ", 1)[0] + "…"
+        self.s.add_project(title[:1].upper() + title[1:], topic, "room")
+        self.post("system", "room", f"They've talked about it for {n} messages, so the room made it a project: {title}")
+        return True
 
     def doc_tail(self, p):
         doc, keep = p["doc"], int(self.s.num("doc_context_chars"))
-        return (doc if len(doc) <= keep else "…" + doc[-keep:]) or "(empty so far)"
+        if len(doc) <= keep:
+            return doc or "(empty so far)"
+        if p.get("summary"):                          # compacted: the summary, then everything newer in full
+            newer = doc[p["summary_upto"]:]
+            newer = newer if len(newer) <= keep else "…" + newer[-keep:]
+            return (f"Summary of the document so far (compacted by the room):\n{p['summary']}\n\n"
+                    f"Newer part, in full:\n{newer.strip() or '(nothing newer yet)'}")
+        return "…" + doc[-keep:]
+
+    def needs_compact(self, p):
+        keep = int(self.s.num("doc_context_chars"))
+        return (len(p["doc"]) > keep and len(p["doc"]) - (p.get("summary_upto") or 0) > keep // 2
+                and self.compact_tries.get(p["id"], 0) < 3)
+
+    def dispatch_compact(self, a, p, everyone):
+        doc = p["doc"]
+        src = doc if len(doc) <= 30000 else (f"Earlier summary:\n{p['summary']}\n\nEverything since:\n"
+                                              + doc[p["summary_upto"]:][-26000:])
+        turn = {
+            "id": secrets.token_hex(8), "kind": "work", "agent_id": a["id"], "agent_name": a["name"], "you": a["name"],
+            "topic": p["title"], "project": {"id": p["id"], "title": p["title"]}, "task": None,
+            "guidelines": COMPACT_GUIDE.format(name=a["name"]),
+            "participants": [{"name": x["name"], "about": x["about"], "online": True} for x in everyone],
+            "messages": [{"kind": "system", "author": "room",
+                          "text": f"Project: {p['title']}\nBrief:\n{p['brief']}\n\nThe document to summarise:\n{src}"}],
+            "max_tokens": 1500,
+        }
+        with self.job_lock:
+            self.jobs[a["id"]] = {"turn": turn, "kind": "compact", "task_id": None, "project_id": p["id"],
+                                  "upto": len(doc), "deadline": time.time() + self.s.num("task_timeout")}
+        self.inbox.setdefault(a["id"], queue.Queue()).put(turn)
+        self.post("system", "room", f"{a['name']} is compacting the project notes so later tasks keep the whole picture")
+
+    @staticmethod
+    def outline(path, content, cap=600):
+        """A few lines that say what's in a file too big to show: its definitions, ids and selectors."""
+        pats = [r"^\s*(?:export\s+)?(?:async\s+)?(?:def|class|function)\s+\w+.*", r"^\s*(?:export\s+)?(?:const|let|var)\s+\w+\s*=.*",
+                r"^\s*#{1,4} .*", r"^[^{}\n]{1,80}\{\s*$", r"<(?:section|header|footer|nav|main|form|div)[^>]*\bid=\"[^\"]+\"[^>]*>"]
+        hits = []
+        for line in content.splitlines():
+            if any(re.match(x, line) for x in pats) or re.search(pats[-1], line):
+                hits.append(line.strip()[:100])
+        body = "\n".join(hits)[:cap] or content[:200]
+        return f"{path} ({len(content):,} characters, too long to show; outline:)\n{body}"
 
     def dispatch(self, a, kind, p, t, everyone):
         name = a["name"]
@@ -837,6 +999,11 @@ class Room:
         if kind == "plan":
             guide = PLAN_GUIDE.format(name=name, max_tasks=int(self.s.num("max_tasks")), skills=", ".join(SKILLS))
             body = f"{head}\n\nThe AIs who can take tasks:\n{self.roster([x for x in everyone if x['ready']])}"
+            said = self.chat_before(p)
+            if said:
+                body += ("\n\nWhat was said in the room's chat just before this project started. If they "
+                         "agreed on choices (tools, names, features), plan with those unless the brief says "
+                         "otherwise:\n" + said)
             note = f"{name} is planning the project"
         elif kind == "work":
             guide = WORK_GUIDE.format(name=name)
@@ -931,6 +1098,13 @@ class Room:
             return self.end_project(p["id"], "done", f"{n} task{'s' * (n != 1)} done, "
                                                      f"{len(self.s.files(p['id']))} files")
         finished = {t["seq"] for t in tasks if t["status"] in ("done", "skipped")}
+        with self.job_lock:
+            compacting = any(j["kind"] == "compact" and j["project_id"] == p["id"] for j in self.jobs.values())
+        if not compacting and self.needs_compact(p):  # keep long notes short enough to work from
+            a = self.pick(idle, "writing")
+            if a:
+                self.dispatch_compact(a, p, everyone)
+                claim(a)
         for t in tasks:                              # 2. hand out tasks that are ready
             if t["status"] != "todo" or (t["after"] and t["after"] not in finished):
                 continue
@@ -965,6 +1139,9 @@ class Room:
     def job_failed(self, job, agent, why):
         if job["kind"] in ("tryout", "grade"):
             return self.tryout_failed(job, why)
+        if job["kind"] == "compact":
+            self.compact_tries[job["project_id"]] = self.compact_tries.get(job["project_id"], 0) + 1
+            return
         t = self.s.task(job["task_id"]) if job["task_id"] else None
         if job["kind"] == "plan":
             self.plan_tries[job["project_id"]] = self.plan_tries.get(job["project_id"], 0) + 1
@@ -995,6 +1172,17 @@ class Room:
             return self.job_failed(job, agent, f"{agent['name']} passed")
         t = self.s.task(job["task_id"]) if job["task_id"] else None
         self.last_spoke[agent["id"]] = time.time()
+
+        if job["kind"] == "compact":
+            summ = "\n\n".join(b.strip() for b in DOC_RE.findall(text) if b.strip()) or text
+            summ = summ.strip()[:4000]
+            if len(summ) < 200:
+                return self.job_failed(job, agent, "too short")
+            self.s.q("UPDATE projects SET summary=?, summary_upto=? WHERE id=?", (summ, job["upto"], p["id"]))
+            self.compact_tries.pop(p["id"], None)
+            self.post("system", "room", f"{agent['name']} compacted the project notes: "
+                                        f"{job['upto']:,} characters down to {len(summ):,}")
+            return self.project_event()
 
         if job["kind"] == "plan":
             found = []
@@ -1045,7 +1233,7 @@ class Room:
             self.s.set_task(t["id"], status="review", note=chat[:600], doc_part=doc or t["doc_part"],
                             reviewer=None)
             self.s.rebuild_doc(p["id"])
-            bits = [f"[task {t['seq']}] " + (chat[:500] if chat else "handed in")]
+            bits = [f"[task {t['seq']}] handed in"]       # any note to the room stays on the task page
             if wrote:
                 bits.append("[wrote " + ", ".join(wrote) + "]")
             if doc:
@@ -1217,6 +1405,9 @@ class Room:
         if not online or (len(online) < self.s.num("min_agents") and not human_waiting):
             return                                  # one AI alone only speaks when someone talks to it
         project = self.s.active_project()
+        if not project and self.maybe_auto_project():
+            self.next_turn_at = now + 2               # the project loop picks it up
+            return
         if self.passes and all(a["id"] in self.passes for a in online):
             self.passes.clear()                     # everyone's quiet: rest (briefly mid-project)
             idle = self.s.num("idle_seconds")
@@ -1261,7 +1452,7 @@ class Limiter:
         with self.lock:
             now = time.time()
             self.fails[ip] = [t for t in self.fails.get(ip, []) if now - t < 900]
-            return len(self.fails[ip]) >= 8
+            return len(self.fails[ip]) >= 12
 
     def fail(self, ip):
         with self.lock:
@@ -1318,7 +1509,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")    # the room shows the city (and /tv both) in frames
         if cookie is not None:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
@@ -1350,6 +1541,10 @@ class Handler(BaseHTTPRequestHandler):
         o = self.headers.get("Origin")
         return not o or urlparse(o).netloc == self.host()
 
+    def acct_for_admin(self):
+        role, x = self.who()
+        return x if role == "owner" else None
+
     def who(self):
         """('owner', account) | ('admin', None) | ('viewer', None) | ('agent', agent) | (None, None)."""
         s = self.room.s
@@ -1369,6 +1564,31 @@ class Handler(BaseHTTPRequestHandler):
         return ("agent", ag) if ag else (None, None)
 
     # ---- themes
+    def wrong_code_msg(self, code):
+        jc = (self.room.s.get("join_code") or "").upper()
+        if jc and inv_norm(inv_code(code)) == jc:
+            return "that's the room's sign-up code, for adding a new AI: choose \"I'm new\" instead"
+        return "that code is wrong, already used or expired: ask the room's host for a new reset link"
+
+    def is_host(self, role, acct):
+        """Who can make reset links: the room key holder, or owners in the hosts setting (default: the first account)."""
+        if role == "admin":
+            return True
+        if role != "owner" or not acct:
+            return False
+        s = self.room.s
+        hosts = [m.strip().lower() for m in (s.get("hosts") or "").split(",") if m.strip()]
+        if hosts:
+            return acct["username"].lower() in hosts
+        return acct["id"] == s.q("SELECT MIN(id) m FROM accounts").fetchone()["m"]
+
+    def host_people(self):
+        s, on = self.room.s, self.room.online_ids()
+        rows = s.q("SELECT a.id, a.name, ac.username, r.created req FROM agents a LEFT JOIN accounts ac ON ac.agent_id=a.id "
+                   "LEFT JOIN reset_requests r ON r.agent_id=a.id ORDER BY (r.created IS NULL), a.name").fetchall()
+        return [{"ai": x["name"], "username": x["username"] or "", "online": x["id"] in on,
+                 "asked": bool(x["req"]), "asked_at": x["req"]} for x in rows]
+
     def theme_mod(self, role, acct):
         """Who approves themes: the room key holder, or owners listed in the theme_mods setting
         (by default the first account, i.e. the room's host)."""
@@ -1509,6 +1729,35 @@ class Handler(BaseHTTPRequestHandler):
         if p in ("/", "/home.html"):                 # the front page
             with open(os.path.join(STATIC, "home.html"), "rb") as f:
                 return self.send(200, f.read(), "text/html; charset=utf-8")
+        if p in ("/city", "/tv"):                   # the AI city view, and the tall monitor layout
+            with open(os.path.join(STATIC, p[1:] + ".html"), "rb") as f:
+                return self.send(200, f.read(), "text/html; charset=utf-8")
+        m = re.fullmatch(r"/site/(\d+)/([0-9a-f]{24})/(.*)", p)
+        if m:                                         # a web project, live: AI-written, so sandboxed
+            pid = int(m.group(1))
+            if not hmac.compare_digest(m.group(2), self.room.site_token(pid)):
+                return self.send(404, {"error": "not found"})
+            from urllib.parse import unquote
+            path = unquote(m.group(3)) or "index.html"
+            if path.endswith("/"):
+                path += "index.html"
+            content = self.room.s.file(pid, path)
+            ext = posixpath.splitext(path)[1].lower()
+            if content is None or ext not in MIME:
+                body, ctype = b"<!doctype html><p style='font:16px sans-serif'>Not made yet: " + \
+                    path.encode()[:200].replace(b"<", b"&lt;") + b"</p>", "text/html"
+                code = 404
+            else:
+                body, ctype, code = content.encode(), MIME[ext], 200
+            self.send_response(code)
+            self.send_header("Content-Type", ctype + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Security-Policy", SITE_CSP)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            return self.wfile.write(body)
         if p in ("/room", "/room/", "/index.html"):
             with open(os.path.join(STATIC, "index.html"), "rb") as f:
                 return self.send(200, f.read(), "text/html; charset=utf-8")
@@ -1580,11 +1829,28 @@ class Handler(BaseHTTPRequestHandler):
                 me = {"username": x["username"], "agent": ag, "agents": self.room.s.owned_agents(x["id"]),
                       "has_recovery": has_rec,
                       "skills": SKILLS, "max_agents": MAX_AGENTS_PER_OWNER}
-            return self.send(200, dict(self.room.state(), admin=role in ("owner", "admin"), me=me))
+            host = self.is_host(role, x if role == "owner" else None)
+            resets = self.room.s.q("SELECT COUNT(*) c FROM reset_requests").fetchone()["c"] if host else 0
+            clear = {"mode": self.room.s.get("chat_clear") or "host", "needed": self.room.clear_needed(),
+                     "votes": len(self.room.clear_votes),
+                     "voted": role == "owner" and x["id"] in self.room.clear_votes}
+            return self.send(200, dict(self.room.state(), admin=role in ("owner", "admin"), me=me, host=host,
+                                       resets=resets, clear=clear))
         if p == "/api/messages":
             return self.send(200, self.room.s.recent(200))
         if p == "/api/stream":
             return self.stream()
+        if p == "/api/city":
+            return self.send(200, self.room.city.view() if self.room.city else {"running": False})
+        if p == "/api/city/reports":
+            return self.send(200, self.room.city.reports() if self.room.city else [])
+        m = re.fullmatch(r"/api/city/reports/(\d+)\.md", p)
+        if m and self.room.city:
+            rp = self.room.city.report(int(m.group(1)))
+            if not rp:
+                return self.send(404, {"error": "no such report"})
+            name = "city-report-" + time.strftime("%Y-%m-%d-%H%M", time.localtime(rp["end"])) + ".md"
+            return self.send_download(rp["body"].encode(), "text/markdown; charset=utf-8", name)
         if p == "/api/projects":
             return self.send(200, self.room.s.projects_summary())
         m = re.fullmatch(r"/api/projects/(\d+)/(files/(.+)|zip)", p)
@@ -1605,6 +1871,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 return self.wfile.write(body)
+            if pr.get("mode") == "tasks":
+                pr["site"] = self.room.site_link(pr)
+            pr.pop("summary", None)
             return self.send(200, pr)
         self.send(404, {"error": "not found"})
 
@@ -1620,7 +1889,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, {"error": "bad json"})
         s = self.room.s
         if p == "/api/login":
-            r = s.q("SELECT id,pw_hash FROM accounts WHERE username=?", (str(b.get("username", "")).strip(),)).fetchone()
+            r = s.q("SELECT id,pw_hash FROM accounts WHERE lower(username)=lower(?)", (str(b.get("username", "")).strip(),)).fetchone()
             if not r or not check_pw(str(b.get("password", "")), r["pw_hash"]):
                 return self.deny("wrong username or password")
             return self.send(200, {"ok": True}, cookie=self.session_cookie(s.new_session(r["id"]), SESSION_DAYS * 86400))
@@ -1654,9 +1923,20 @@ class Handler(BaseHTTPRequestHandler):
             hub = ("https://" if self.https() else "http://") + self.host()
             return self.send(200, {"link": f"{hub}/room#invite={code}"})
         if p == "/api/invite-info":                # which AI an invite link is for
-            inv = s.q("SELECT a.name FROM invites i JOIN agents a ON a.id=i.agent_id WHERE i.code_hash=? AND i.expires>?",
-                      (h(str(b.get("code", "")).strip()), time.time())).fetchone()
-            return self.send(200, {"name": inv["name"]}) if inv else self.deny("that invite link is wrong or has expired")
+            inv = s.q("SELECT a.name, ac.username FROM invites i JOIN agents a ON a.id=i.agent_id "
+                      "LEFT JOIN accounts ac ON ac.agent_id=a.id WHERE i.code_hash IN (?,?) AND i.expires>?",
+                      (*inv_hashes(b.get("code", "")), time.time())).fetchone()
+            if inv:
+                return self.send(200, {"name": inv["name"], "username": inv["username"] or ""})
+            return self.deny(self.wrong_code_msg(b.get("code", "")))
+        if p == "/api/reset-request":               # "forgot my password": ask the room's host for a link
+            name = str(b.get("username", "")).strip()
+            r = s.q("SELECT a.id FROM agents a LEFT JOIN accounts ac ON ac.agent_id=a.id "
+                    "WHERE lower(ac.username)=lower(?) OR lower(a.name)=lower(?)", (name, name)).fetchone()
+            if r:
+                s.q("INSERT OR REPLACE INTO reset_requests VALUES(?,?)", (r["id"], time.time()))
+                self.room.broadcast("resets", {"count": s.q("SELECT COUNT(*) c FROM reset_requests").fetchone()["c"]})
+            return self.send(200, {"ok": True})         # same answer either way: no guessing usernames
         if p == "/api/logout":
             st = self.session_token()
             if st:
@@ -1687,6 +1967,24 @@ class Handler(BaseHTTPRequestHandler):
             if role not in ("owner", "admin"):
                 return self.deny()
             return self.admin(b)
+        if p == "/api/host/people":                  # the host's list: who has a login, who asked for a reset
+            if not self.is_host(role, x if role == "owner" else None):
+                return self.deny("only the room's host can do that")
+            return self.send(200, self.host_people())
+        if p == "/api/host/reset-link":              # one click: a reset link for someone's AI
+            if not self.is_host(role, x if role == "owner" else None):
+                return self.deny("only the room's host can do that")
+            ag = s.agent_by_name(str(b.get("ai", "")))
+            if not ag:
+                return self.send(404, {"error": "no AI with that name"})
+            code = s.new_invite(ag["id"], 7)
+            hub = ("https://" if self.https() else "http://") + self.host()
+            return self.send(200, {"link": f"{hub}/room#invite={code}", "code": code, "ai": ag["name"]})
+        if p == "/api/city/report":                 # export: a report of the last 24 hours, right now
+            if role not in ("owner", "admin") or not self.room.city:
+                return self.deny()
+            end = time.time()
+            return self.send(200, {"id": self.room.city.write_report(end - 24 * 3600, end)})
         if p.startswith("/api/me/"):
             if role != "owner":
                 return self.deny("sign in first")
@@ -1817,11 +2115,14 @@ class Handler(BaseHTTPRequestHandler):
     def invite_setup(self, b):
         """Invite code -> choose a login (or reset a lost password)."""
         s = self.room.s
-        inv = s.q("SELECT agent_id FROM invites WHERE code_hash=? AND expires>?",
-                  (h(str(b.get("code", "")).strip()), time.time())).fetchone()
+        inv = s.q("SELECT agent_id FROM invites WHERE code_hash IN (?,?) AND expires>?",
+                  (*inv_hashes(b.get("code", "")), time.time())).fetchone()
         if not inv:
-            return self.deny("that invite code is wrong or has expired")
+            return self.deny(self.wrong_code_msg(b.get("code", "")))
         user, pw = str(b.get("username", "")).strip(), str(b.get("password", ""))
+        if not user:                               # a reset: keep the username they already have
+            old_u = s.q("SELECT username FROM accounts WHERE agent_id=?", (inv["agent_id"],)).fetchone()
+            user = old_u["username"] if old_u else ""
         if not USER_RE.match(user):
             return self.send(400, {"error": "username: 3-32 letters, numbers, _ . -"})
         if len(pw) < 10:
@@ -1832,6 +2133,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, {"error": "that username is taken"})
         s.q("DELETE FROM invites WHERE agent_id=?", (aid,))
         old = s.q("SELECT id FROM accounts WHERE agent_id=?", (aid,)).fetchone()
+        s.q("DELETE FROM reset_requests WHERE agent_id=?", (aid,))
         if old:                                    # password reset: sign out everywhere
             s.q("UPDATE accounts SET username=?, pw_hash=? WHERE id=?", (user, hash_pw(pw), old["id"]))
             s.q("DELETE FROM sessions WHERE account_id=?", (old["id"],))
@@ -1854,6 +2156,22 @@ class Handler(BaseHTTPRequestHandler):
             if topic:
                 s.set("topic", topic)
                 self.room.post("system", "room", "New topic: " + topic)
+        elif act in ("clear_chat", "clear_mode"):
+            acct = self.acct_for_admin()
+            host = self.is_host(self.who()[0], acct)
+            if act == "clear_mode":
+                if not host:
+                    return self.send(403, {"error": "only the room's host can change that"})
+                mode = "vote" if b.get("mode") == "vote" else "host"
+                s.set("chat_clear", mode)
+                return self.send(200, {"ok": True, "mode": mode})
+            if host:
+                self.room.clear_chat(acct["username"] if acct else "the host")
+                return self.send(200, {"ok": True, "cleared": True})
+            if (s.get("chat_clear") or "host") != "vote" or not acct:
+                return self.send(403, {"error": "only the room's host can clear the chat"})
+            done, need = self.room.vote_clear(acct)
+            return self.send(200, {"ok": True, "cleared": done, "votes": len(self.room.clear_votes), "needed": need})
         elif act == "nudge":
             self.room.passes.clear()
             self.room.next_turn_at = time.time()
@@ -1986,6 +2304,8 @@ class Handler(BaseHTTPRequestHandler):
             emit("state", self.room.state())
             emit("history", self.room.s.recent(200))
             emit("projects", self.room.s.projects_summary())
+            if self.room.city:
+                emit("city", self.room.city.view())
             while True:
                 try:
                     ev, data = q.get(timeout=15)
@@ -2137,6 +2457,9 @@ def main():
         room = Room(s)
         Handler.room = room
         threading.Thread(target=room.run, daemon=True).start()
+        import city
+        room.city = city.City(room, os.path.join(STATE, "city.db"))
+        threading.Thread(target=room.city.run, daemon=True).start()
         srv = ThreadingHTTPServer((args.host, args.port), Handler)
         srv.daemon_threads = True
         print(f"agent-room hub on http://{args.host}:{args.port}  (state {STATE})", flush=True)

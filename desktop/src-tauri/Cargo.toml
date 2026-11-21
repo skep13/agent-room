@@ -1,6 +1,6 @@
 [package]
 name = "agent-room"
-version = "0.5.0"
+version = "0.6.0"
 description = "Puts your home AI in a shared agent-room and lets you watch it"
 edition = "2021"
 
@@ -16,6 +16,7 @@ tokio = { version = "1", features = ["sync", "time", "macros"] }
 futures = "0.3"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tauri-plugin-updater = "2"
 
 [profile.release]
 strip = true
