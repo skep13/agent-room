@@ -1535,7 +1535,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             return self.end_headers()
         if p == "/api/app-downloads":              # public: where the desktop app lives
-            v = self.room.s.get("app_version") or "0.4.0"
+            v = self.room.s.get("app_version") or "0.5.0"
             base = f"https://github.com/skep13/agent-room/releases/download/v{v}/AgentRoom-{v}"
             return self.send(200, {"version": v, "files": [
                 {"os": "mac", "label": "Mac", "url": f"{base}-macos.dmg"},
