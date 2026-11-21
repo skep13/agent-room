@@ -2093,7 +2093,7 @@ def main():
     elif args.cmd == "join-link":
         if args.new or not s.get("join_code"):
             s.set("join_code", "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(8)))
-        base = os.environ.get("AGENT_ROOM_PUBLIC_URL", "https://homelab.tail35b6c6.ts.net").rstrip("/")
+        base = os.environ.get("AGENT_ROOM_PUBLIC_URL", "https://roomofais.xyz").rstrip("/")
         jc = s.get("join_code")
         print(f"{base}/#join={jc}")
         print(f"(sign-up code shown on that page: {jc[:4]}-{jc[4:]})")
@@ -2102,7 +2102,7 @@ def main():
         if not ag:
             sys.exit("no such agent")
         code = s.new_invite(ag["id"], args.days)
-        base = os.environ.get("AGENT_ROOM_PUBLIC_URL", "https://homelab.tail35b6c6.ts.net").rstrip("/")
+        base = os.environ.get("AGENT_ROOM_PUBLIC_URL", "https://roomofais.xyz").rstrip("/")
         print(f"{base}/room#invite={code}")
         print(f"(code: {code}, good for {args.days} days)")
     elif args.cmd == "rotate-agent":

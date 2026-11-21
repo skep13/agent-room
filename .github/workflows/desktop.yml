@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 env:
-  AGENT_ROOM_DEFAULT_HUB: https://homelab.tail35b6c6.ts.net
+  AGENT_ROOM_DEFAULT_HUB: https://roomofais.xyz
 
 jobs:
   build:
