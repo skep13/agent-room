@@ -89,6 +89,35 @@ TRUSTED_PROXIES = {a.strip() for a in os.environ.get("AGENT_ROOM_TRUSTED_PROXIES
 LOCAL = {"127.0.0.1", "::1"}
 SESSION_DAYS = 30
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,31}$")
+
+# Themes are settings, not CSS: every value is checked against these rules, so a
+# shared theme can recolour the room but can't load anything, hide anything or leak anything.
+THEME_COLOURS = ("bg", "panel", "ink", "muted", "line", "accent", "pop1", "pop2", "ok", "bad")
+THEME_CHOICES = {"display": ("poster", "clean", "serif", "mono"), "body": ("grotesk", "system", "serif", "mono"),
+                 "corners": ("sharp", "soft", "round"), "shadow": ("hard", "soft", "none"),
+                 "pattern": ("dots", "stripes", "grid", "none"), "motion": ("full", "calm")}
+HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+THEME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 '&.,!-]{1,39}$")
+MAX_THEMES_PER_OWNER = 10
+REPORTS_TO_HIDE = 3
+
+
+def clean_theme(tokens):
+    """The checked theme, or raise ValueError saying what's wrong."""
+    if not isinstance(tokens, dict):
+        raise ValueError("theme must be a set of values")
+    out = {}
+    for k in THEME_COLOURS:
+        v = str(tokens.get(k, ""))
+        if not HEX_RE.match(v):
+            raise ValueError(f"{k}: pick a colour")
+        out[k] = v.lower()
+    for k, opts in THEME_CHOICES.items():
+        v = str(tokens.get(k, opts[0]))
+        if v not in opts:
+            raise ValueError(f"{k}: one of {', '.join(opts)}")
+        out[k] = v
+    return out
 USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 COLORS = ["#e07a5f", "#3d9a8b", "#7b6cd9", "#d4a017", "#4a90d9", "#c2577a", "#6a994e"]
@@ -284,6 +313,13 @@ class Store:
                 doc_part TEXT NOT NULL DEFAULT '', review TEXT NOT NULL DEFAULT '',
                 rounds INTEGER NOT NULL DEFAULT 0, declined TEXT NOT NULL DEFAULT '[]',
                 added_by TEXT DEFAULT '', updated REAL);
+            CREATE TABLE IF NOT EXISTS themes (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL, account_id INTEGER NOT NULL, author TEXT NOT NULL,
+                tokens TEXT NOT NULL DEFAULT '',            -- the approved version ('' until first approval)
+                pending TEXT NOT NULL DEFAULT '',           -- a new version waiting for approval
+                status TEXT NOT NULL DEFAULT 'pending',     -- pending | approved | rejected | hidden
+                version INTEGER NOT NULL DEFAULT 0, installs INTEGER NOT NULL DEFAULT 0,
+                reporters TEXT NOT NULL DEFAULT '[]', note TEXT NOT NULL DEFAULT '', created REAL, updated REAL);
             CREATE TABLE IF NOT EXISTS files (
                 project_id INTEGER NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL,
                 author TEXT, task_seq INTEGER, updated REAL, PRIMARY KEY (project_id, path));
@@ -313,6 +349,8 @@ class Store:
         acols = {r["name"] for r in self.db.execute("PRAGMA table_info(accounts)")}
         if "recovery_hash" not in acols:              # one-time code to reset a forgotten password
             self.db.execute("ALTER TABLE accounts ADD COLUMN recovery_hash TEXT NOT NULL DEFAULT ''")
+        if "theme" not in acols:                      # installed theme: {id, version, tokens} snapshot
+            self.db.execute("ALTER TABLE accounts ADD COLUMN theme TEXT NOT NULL DEFAULT ''")
         pcols = {r["name"] for r in self.db.execute("PRAGMA table_info(projects)")}
         if "mode" not in pcols:                       # older projects were chat-only
             self.db.execute("ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'")
@@ -1329,6 +1367,134 @@ class Handler(BaseHTTPRequestHandler):
         ag = s.agent_by_token(k)
         return ("agent", ag) if ag else (None, None)
 
+    # ---- themes
+    def theme_mod(self, role, acct):
+        """Who approves themes: the room key holder, or owners listed in the theme_mods setting
+        (by default the first account, i.e. the room's host)."""
+        if role == "admin":
+            return True
+        if role != "owner" or not acct:
+            return False
+        s = self.room.s
+        mods = [m.strip().lower() for m in (s.get("theme_mods") or "").split(",") if m.strip()]
+        if mods:
+            return acct["username"].lower() in mods
+        first = s.q("SELECT MIN(id) m FROM accounts").fetchone()["m"]
+        return acct["id"] == first
+
+    def theme_row(self, r, mine=False):
+        d = {"id": r["id"], "name": r["name"], "author": r["author"], "version": r["version"],
+             "installs": r["installs"], "status": r["status"],
+             "tokens": json.loads(r["tokens"]) if r["tokens"] else None}
+        if mine:
+            d["pending"] = json.loads(r["pending"]) if r["pending"] else None
+            d["note"] = r["note"]
+        return d
+
+    def themes_get(self):
+        s = self.room.s
+        role, acct = self.who()
+        if role not in ("owner", "admin"):
+            acct = None
+        mod = self.theme_mod(role, acct)
+        out = {"themes": [self.theme_row(r) for r in s.q(
+                   "SELECT * FROM themes WHERE status='approved' ORDER BY installs DESC, updated DESC LIMIT 200")],
+               "rules": {"colours": list(THEME_COLOURS), "choices": THEME_CHOICES},
+               "signed_in": bool(acct), "moderator": mod, "mine": [], "installed": None, "review": []}
+        if acct:
+            out["mine"] = [self.theme_row(r, True) for r in s.q(
+                "SELECT * FROM themes WHERE account_id=? ORDER BY updated DESC", (acct["id"],))]
+            inst = s.q("SELECT theme FROM accounts WHERE id=?", (acct["id"],)).fetchone()["theme"]
+            out["installed"] = json.loads(inst) if inst else None
+        if mod:
+            out["review"] = [self.theme_row(r, True) for r in s.q(
+                "SELECT * FROM themes WHERE pending<>'' AND status<>'rejected' ORDER BY updated")]
+        return self.send(200, out)
+
+    def themes_post(self, p, b, role, acct):
+        s = self.room.s
+        mod = self.theme_mod(role, acct)
+        tid = int(b.get("id") or 0)
+        row = s.q("SELECT * FROM themes WHERE id=?", (tid,)).fetchone() if tid else None
+        if p == "/api/themes/save":                  # new theme, or a new version of your own
+            if role != "owner":
+                return self.send(400, {"error": "sign in as an owner to publish themes"})
+            name = str(b.get("name", "")).strip()
+            if not THEME_NAME_RE.match(name):
+                return self.send(400, {"error": "name: 2 to 40 letters, numbers or simple punctuation"})
+            try:
+                tok = json.dumps(clean_theme(b.get("tokens")))
+            except ValueError as e:
+                return self.send(400, {"error": str(e)})
+            now = time.time()
+            if row:
+                if row["account_id"] != acct["id"]:
+                    return self.send(403, {"error": "that's not your theme"})
+                if mod:                                  # moderators' own changes go straight out
+                    s.q("UPDATE themes SET name=?, tokens=?, pending='', status='approved', version=version+1, note='', updated=? WHERE id=?",
+                        (name, tok, now, tid))
+                else:
+                    s.q("UPDATE themes SET name=?, pending=?, note='', updated=? WHERE id=?", (name, tok, now, tid))
+                return self.send(200, {"ok": True, "id": tid, "live": mod})
+            n = s.q("SELECT COUNT(*) c FROM themes WHERE account_id=?", (acct["id"],)).fetchone()["c"]
+            if n >= MAX_THEMES_PER_OWNER:
+                return self.send(400, {"error": f"you can publish up to {MAX_THEMES_PER_OWNER} themes: delete one first"})
+            if mod:
+                cur = s.q("INSERT INTO themes (name, account_id, author, tokens, status, version, created, updated) VALUES (?,?,?,?, 'approved', 1, ?, ?)",
+                          (name, acct["id"], acct["username"], tok, now, now))
+            else:
+                cur = s.q("INSERT INTO themes (name, account_id, author, pending, created, updated) VALUES (?,?,?,?,?,?)",
+                          (name, acct["id"], acct["username"], tok, now, now))
+            return self.send(200, {"ok": True, "id": cur.lastrowid, "live": mod})
+        if p == "/api/themes/install":               # null id = back to the default look
+            if role != "owner":
+                return self.send(400, {"error": "sign in to keep a theme on your account"})
+            if not tid:
+                s.q("UPDATE accounts SET theme='' WHERE id=?", (acct["id"],))
+                return self.send(200, {"ok": True})
+            if not row or row["status"] != "approved" or not row["tokens"]:
+                return self.send(404, {"error": "that theme isn't available"})
+            old = s.q("SELECT theme FROM accounts WHERE id=?", (acct["id"],)).fetchone()["theme"]
+            snap = {"id": tid, "name": row["name"], "version": row["version"], "tokens": json.loads(row["tokens"])}
+            s.q("UPDATE accounts SET theme=? WHERE id=?", (json.dumps(snap), acct["id"]))
+            if not old or json.loads(old).get("id") != tid:
+                s.q("UPDATE themes SET installs=installs+1 WHERE id=?", (tid,))
+            return self.send(200, {"ok": True, "installed": snap})
+        if not row:
+            return self.send(404, {"error": "no such theme"})
+        if p == "/api/themes/review":                # approve or turn down a waiting version
+            if not mod:
+                return self.deny("only the room's theme approvers can do that")
+            if not row["pending"]:
+                return self.send(400, {"error": "nothing waiting on that theme"})
+            if b.get("ok"):
+                s.q("UPDATE themes SET tokens=pending, pending='', status='approved', version=version+1, note='', reporters='[]', updated=? WHERE id=?",
+                    (time.time(), tid))
+            else:
+                note = str(b.get("note", ""))[:200]
+                if row["status"] == "hidden":          # reported theme: keep it off the list
+                    s.q("UPDATE themes SET pending='', status='rejected', note=? WHERE id=?", (note or "removed after reports", tid))
+                elif row["tokens"]:                    # keep the last approved version live
+                    s.q("UPDATE themes SET pending='', note=? WHERE id=?", (note or "this change wasn't approved", tid))
+                else:
+                    s.q("UPDATE themes SET pending='', status='rejected', note=? WHERE id=?", (note or "not approved", tid))
+            return self.send(200, {"ok": True})
+        if p == "/api/themes/report":                # enough reports hide it until reviewed
+            if role != "owner":
+                return self.deny()
+            reps = set(json.loads(row["reporters"]))
+            reps.add(acct["id"])
+            hide = len(reps) >= REPORTS_TO_HIDE and row["status"] == "approved"
+            s.q("UPDATE themes SET reporters=?, status=?, pending=CASE WHEN ? THEN tokens ELSE pending END WHERE id=?",
+                (json.dumps(sorted(reps)), "hidden" if hide else row["status"], 1 if hide else 0, tid))
+            return self.send(200, {"ok": True, "hidden": hide})
+        if p == "/api/themes/delete":
+            if not (mod or (role == "owner" and row["account_id"] == acct["id"])):
+                return self.send(403, {"error": "that's not your theme"})
+            s.q("DELETE FROM themes WHERE id=?", (tid,))
+            return self.send(200, {"ok": True})
+        return self.send(404, {"error": "not found"})
+
     def deny(self, msg="sign in or enter the room key"):
         self.limiter.fail(self.ip())
         time.sleep(0.5)
@@ -1347,6 +1513,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, f.read(), "text/html; charset=utf-8")
         if p == "/api/public":                        # what the front page shows: no chat, no secrets
             return self.send(200, self.room.public())
+        if p == "/api/themes":                        # the theme workshop
+            return self.themes_get()
         if p == "/healthz":
             return self.send(200, {"ok": True})
         if p == "/auth/handoff":
@@ -1522,6 +1690,10 @@ class Handler(BaseHTTPRequestHandler):
             if role != "owner":
                 return self.deny("sign in first")
             return self.me(p, b, x)
+        if p.startswith("/api/themes/"):
+            if role not in ("owner", "admin"):
+                return self.deny("sign in to make or install themes")
+            return self.themes_post(p, b, role, x)
         if p.startswith("/api/projects"):
             if role not in ("owner", "admin"):
                 return self.deny("only the AIs' owners can manage projects")
