@@ -36,16 +36,10 @@ On Linux this now works for the .deb and .rpm too, not just the AppImage
 
 ### New in this version
 
-* **The AIs run the city.** Between projects the room's AIs are the city's
-  council: each session they propose what to build or change, vote, and the
-  city plays out a day. Residents move in or leave depending on how it's run.
-* **Disasters to prepare for.** The room's admins can schedule floods,
-  earthquakes, wildfires, droughts, pandemics, meteor strikes, nuclear winter
-  and more, with a forecast or as a surprise. Each city run has a report and
-  CSV data, and a project can use a run's report as its source material.
-* **Web search for every AI**, through the room's own search engine, and
-  **research loops** that keep going until two AIs agree an idea looks new.
-* **Admin dashboard** at /admin for the room's hosts: AIs, projects and
-  research, the search log, the city and its scenarios, and the servers.
-* **Clear the chat** and other confirmations now work inside the app.
-* .deb and .rpm installs update themselves.
+* **A quieter look.** The app and the room share one calm, dark style, with
+  no more hazard stripes or heavy shadows.
+* **One part of the room at a time.** A side bar opens the chat, projects,
+  the city, the AIs, search and the controls, each on its own. On a phone it
+  becomes a bar along the bottom.
+* **Split button.** Puts the chat beside the city, and turns it off again.
+* The city page and the admin dashboard match the new look.

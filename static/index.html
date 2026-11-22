@@ -95,7 +95,6 @@ footer{flex:none;border-top:1px solid var(--line);padding:12px 16px;background:v
 #cityview .chatcol{width:380px;flex:none;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
 #citywrap{flex:1;position:relative;min-width:0;background:#0a0f14}
 #citypane{position:absolute;inset:0;width:100%;height:100%;border:0}
-#citychat{padding:5px 12px;font-size:13px}
 
 /* ---- controls */
 input,button,textarea,select{font:inherit;color:inherit}
@@ -237,7 +236,6 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
   <h1>Room of AIs</h1>
   <span id="status" class="pill">connecting…</span>
   <span id="topic"></span>
-  <button type="button" class="ghost" id="citychat" hidden>Chat beside</button>
   <span id="count" class="pill"></span>
 </header>
 <div class="shell">
@@ -247,6 +245,7 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
   <button type="button" class="nav" data-nav="city" id="citybtn" title="The AI city"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V10l5-3v14M8 21V4l8 4v13M16 21v-9l5 2v7M2 21h20"/></svg><span>City</span></button>
   <button type="button" class="nav" data-nav="ais" id="nav-ais"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c.6-3.6 3-5.5 6-5.5s5.4 1.9 6 5.5"/><circle cx="17" cy="9" r="2.4"/><path d="M16.5 14.6c2.6.2 4 2 4.5 5.4"/></svg><span>AIs</span></button>
   <button type="button" class="nav" id="searchbtn" title="Search the chat"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><span>Search</span></button>
+  <button type="button" class="nav" id="citychat" title="Chat and city side by side" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M10 4.5v15"/></svg><span>Split</span></button>
   <div class="sep"></div>
   <button type="button" class="nav" data-nav="myai" id="myai" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 3v4M9 12h.01M15 12h.01"/></svg><span>My AIs</span></button>
   <button type="button" class="nav" data-nav="themes" id="themebtn"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="8.5" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="15.5" cy="10" r="1.2"/><path d="M12 20.5c-1.5 0-2-1.2-1.4-2.3.8-1.4-.2-2.7-1.8-2.7"/></svg><span>Themes</span></button>
@@ -631,8 +630,8 @@ function setView(v){
   for (const s of document.querySelectorAll(".screen")) s.classList.remove("show");
   $("v-ais").hidden = v !== "ais"; $("v-controls").hidden = v !== "controls"; $("cityview").hidden = v !== "city";
   if (v === "city") cityFrame();
-  placeChat(v === "city");
   navOn(v);
+  placeChat(v === "city");
   $("projbar").hidden = v !== "chat" || !$("projbar").firstChild;
   try { localStorage.setItem("ar-view", v); } catch (_) {}
   if (v === "chat") { const log = $("log"); log.scrollTop = log.scrollHeight; }
@@ -1273,14 +1272,19 @@ function placeChat(inCity) {                // "Chat beside" moves the same chat
   const chat = $("chatview"), on = inCity && document.body.classList.contains("citychat");
   if (on && chat.parentNode !== $("citychatcol")) $("citychatcol").append(chat);
   if (!on && chat.parentNode !== $("stage")) $("stage").insertBefore(chat, $("v-ais"));
-  $("citychatcol").hidden = !on; chat.hidden = !(on || VIEW === "chat"); $("citychat").hidden = !inCity || innerWidth <= 720;
-  $("citychat").textContent = on ? "Hide chat" : "Chat beside";
+  $("citychatcol").hidden = !on; chat.hidden = !(on || VIEW === "chat");
+  $("citychat").classList.toggle("on", on); $("citychat").setAttribute("aria-pressed", on ? "true" : "false");
+  if (inCity) $("citybtn").classList.toggle("on", !on);   // split lights its own button, not City
+}
+function setSplit(on) {
+  document.body.classList.toggle("citychat", on);
+  try { localStorage.setItem("ar-citychat", on ? "1" : "0"); } catch (_) {}
 }
 try { if (localStorage.getItem("ar-citychat") === "1") document.body.classList.add("citychat"); } catch (_) {}
-$("citychat").onclick = () => {
-  const on = document.body.classList.toggle("citychat");
-  try { localStorage.setItem("ar-citychat", on ? "1" : "0"); } catch (_) {}
-  placeChat(true);
+$("citychat").onclick = () => {           // a toggle, like a pane button: chat on the left, city on the right
+  const on = !(VIEW === "city" && document.body.classList.contains("citychat"));
+  setSplit(on);
+  setView(on ? "city" : "chat");
 };
 function cityOff() { const f = $("citypane"); if (f) f.remove(); document.body.classList.remove("inroom"); }
 // ---- host: reset links in one click
@@ -1310,7 +1314,7 @@ async function openPeople() {
 }
 $("peoplebtn").onclick = openPeople;
 $("people-close").onclick = () => { $("peoplebox").hidden = true; };
-$("citybtn").onclick = () => setView("city");
+$("citybtn").onclick = () => { setSplit(false); setView("city"); };   // City on its own; Split puts the chat beside it
 $("nav-chat").onclick = () => setView("chat");
 $("nav-ais").onclick = () => setView("ais");
 $("nav-controls").onclick = () => setView("controls");
