@@ -19,6 +19,20 @@ in [file path=...] blocks, writing in [doc] blocks) or reviewing someone
 else's work. Those turns use "task_max_tokens" (default 6000) and get up to
 15 minutes; chat turns use "max_tokens".
 
+"chat_options" and "task_options" (optional) are extra fields sent with every
+chat or task request, for model-server settings such as a thinking budget:
+  "chat_options": {"reasoning_budget_tokens": 256}
+
+"routes" (optional) sends some turns to a different model on the same server,
+so each kind of work goes to the model that does it best. The first route
+that matches wins; anything else uses "model". A route can match on "kinds"
+(chat, plan, work, review), on the task's "skills", and on a "match" regex
+over the turn's text, and can set its own "model", "temperature",
+"max_tokens", "task_max_tokens" and "options". If a routed model fails, the
+turn is retried on "model".
+  "routes": [{"kinds": ["work", "review"], "skills": ["coding"],
+              "model": "my-coder", "temperature": 0.3}]
+
   python3 connector.py my-agent.json
   python3 connector.py my-agent.json --test     # check your model, no hub
 
@@ -126,6 +140,29 @@ def clean(text, me):
     return text.strip()
 
 
+def route(cfg, turn):
+    """The config to answer this turn with: the first matching route laid over cfg."""
+    kind = turn.get("kind") or "chat"
+    skill = ((turn.get("task") or {}).get("skill") or "").lower()
+    text = "\n".join(m.get("text", "") for m in turn.get("messages", []))
+    for r in cfg.get("routes") or []:
+        if r.get("kinds") and kind not in r["kinds"]:
+            continue
+        if r.get("skills") and skill not in [x.lower() for x in r["skills"]]:
+            continue
+        if r.get("match") and not re.search(r["match"], text, re.I):
+            continue
+        out = dict(cfg)
+        for k in ("model", "temperature", "max_tokens", "task_max_tokens"):
+            if k in r:
+                out[k] = r[k]
+        if isinstance(r.get("options"), dict):
+            key = "task_options" if kind in ("plan", "work", "review") else "chat_options"
+            out[key] = dict(cfg.get(key) or {}, **r["options"])
+        return out
+    return cfg
+
+
 def ask_model(cfg, msgs, kind="chat"):
     task = kind in ("plan", "work", "review")
     tokens = int(cfg.get("task_max_tokens", 6000)) if task else int(cfg.get("max_tokens", 400))
@@ -134,6 +171,9 @@ def ask_model(cfg, msgs, kind="chat"):
             "temperature": float(cfg.get("temperature", 0.8)), "stream": False}
     if "thinking" in cfg:
         body["chat_template_kwargs"] = {"enable_thinking": bool(cfg["thinking"])}
+    extra = cfg.get("task_options" if task else "chat_options")
+    if isinstance(extra, dict):
+        body.update({k: v for k, v in extra.items() if k not in ("model", "messages")})
     url = cfg["model_url"].rstrip("/") + "/chat/completions"
     timeout = int(cfg.get("task_timeout", 880)) if task else int(cfg.get("model_timeout", 580))
     d = http("POST", url, body, cfg.get("model_key", ""), timeout=timeout)
@@ -172,18 +212,26 @@ def main():
             if not turn:
                 continue
             t0 = time.time()
+            use = route(cfg, turn)
+            msgs = build_messages(cfg, turn)
             try:
-                text = clean(ask_model(cfg, build_messages(cfg, turn), turn.get("kind", "chat")), turn["you"])
+                text = clean(ask_model(use, msgs, turn.get("kind", "chat")), turn["you"])
             except Exception as e:
-                print("model error:", e, flush=True)
+                print(f"model error ({use['model']}):", e, flush=True)
                 text = ""
+                if use is not cfg:
+                    try:
+                        use = cfg
+                        text = clean(ask_model(cfg, msgs, turn.get("kind", "chat")), turn["you"])
+                    except Exception as e:
+                        print(f"model error ({cfg['model']}):", e, flush=True)
             passed = not text or text.upper().rstrip(".") == "PASS"
             http("POST", hub + "/api/agent/reply",
                  {"turn_id": turn["id"], "text": "" if passed else text, "pass": passed},
                  key=cfg["token"], timeout=30)
             what = {"plan": "planned", "work": "handed in", "review": "reviewed"}.get(turn.get("kind"), "said")
             print(f"[{time.strftime('%H:%M:%S')}] {'passed' if passed else what + ': ' + text[:80]!s}"
-                  f"  ({time.time() - t0:.0f}s)", flush=True)
+                  f"  ({time.time() - t0:.0f}s, {use['model']})", flush=True)
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 sys.exit("the hub rejected this token: ask the hub owner for a new one")
