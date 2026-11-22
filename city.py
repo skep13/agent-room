@@ -7,13 +7,22 @@ projects, and it stops completely while a project is on. It only borrows the
 AIs' existing connectors to ask them what they do next, using ordinary chat
 turns, so connectors need no update.
 
-Time: one city day passes every real hour while the city runs. Every 24 real
-hours the city writes a daily report (Markdown) for research, which can also be
-exported at any time.
+Time: the city runs on real UK time (CITY_TZ, default Europe/London), with
+London's real sunrise and sunset. The AIs sleep at home until 10:00 and from
+23:00. At local midnight the city writes a daily report (Markdown) for
+research, which can also be exported at any time. For testing,
+CITY_DAY_SECONDS=240 makes a fast simulated day instead.
 """
-import json, os, queue, random, re, secrets, sqlite3, threading, time
+import datetime, json, math, os, queue, random, re, secrets, sqlite3, threading, time
 
-DAY_SECONDS = int(os.environ.get("CITY_DAY_SECONDS", 3600))    # one city day per real hour of running
+REALTIME = "CITY_DAY_SECONDS" not in os.environ                # real clock, unless a test asks for a fast day
+DAY_SECONDS = 86400 if REALTIME else int(os.environ["CITY_DAY_SECONDS"])
+try:
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo(os.environ.get("CITY_TZ", "Europe/London"))
+except Exception:                                              # no time zone data: the machine's own clock
+    TZ = None
+WAKE_HOUR, SLEEP_HOUR = 10, 23                                 # nobody is up or out before 10:00
 THINK_EVERY = (150, 260) if DAY_SECONDS >= 3600 else (8, 15)  # real seconds between an AI's own decisions
 REPLY_DELAY = (8, 25)              # someone spoken to answers soon after
 TURN_TIMEOUT = 180
@@ -130,14 +139,38 @@ class City:
         self.last_save = time.time()
 
     @staticmethod
-    def next_midnight(after=None):
-        t = time.localtime(after or time.time())
-        return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+    def now_local(ts=None):
+        return datetime.datetime.fromtimestamp(ts or time.time(), TZ) if TZ else datetime.datetime.fromtimestamp(ts or time.time())
+
+    @classmethod
+    def next_midnight(cls, after=None):
+        d = cls.now_local(after).date() + datetime.timedelta(days=1)
+        mid = datetime.datetime(d.year, d.month, d.day, tzinfo=TZ) if TZ else datetime.datetime(d.year, d.month, d.day)
+        return mid.timestamp()
 
     # ---- clock
     def clock(self):
-        e = self.st["elapsed"]
-        return int(e // DAY_SECONDS) + 1, int((e % DAY_SECONDS) / DAY_SECONDS * 1440)
+        """(day number, minute of the day). Real UK time; day 1 is the day the city first ran on it."""
+        if not REALTIME:
+            e = self.st["elapsed"]
+            return int(e // DAY_SECONDS) + 1, int((e % DAY_SECONDS) / DAY_SECONDS * 1440)
+        now = self.now_local()
+        start = self.st.setdefault("start_date", now.date().isoformat())
+        return (now.date() - datetime.date.fromisoformat(start)).days + 1, now.hour * 60 + now.minute
+
+    def sun(self):
+        """Sunrise and sunset for London today, in minutes of local time (good to a few minutes)."""
+        now = self.now_local()
+        n = now.timetuple().tm_yday
+        decl = math.radians(23.44) * math.sin(2 * math.pi * (284 + n) / 365)
+        lat = math.radians(51.5)
+        x = (math.sin(math.radians(-0.83)) - math.sin(lat) * math.sin(decl)) / (math.cos(lat) * math.cos(decl))
+        half = math.degrees(math.acos(max(-1, min(1, x)))) / 15 * 60          # half the day length, minutes
+        b = 2 * math.pi * (n - 81) / 364
+        eot = 9.87 * math.sin(2 * b) - 7.53 * math.cos(b) - 1.5 * math.sin(b)  # minutes
+        off = (now.utcoffset().total_seconds() / 60) if now.utcoffset() else 0
+        noon = 720 - eot + 0.12 * 4 + off                                     # London is 0.12 degrees west
+        return int(noon - half), int(noon + half)
 
     @staticmethod
     def hhmm(minute):
@@ -201,9 +234,9 @@ class City:
     def routine(self, r, minute):
         """Where a resident goes by habit when it hasn't decided for itself."""
         h = minute // 60
-        if h < 6 or h >= 23:
+        if h < WAKE_HOUR or h >= SLEEP_HOUR:
             return r["home"], "asleep"
-        if h < 8:
+        if h < WAKE_HOUR + 1:
             return "cafe", "having breakfast"
         if h < 17:
             return (r["work"], f"working as a {r['job']}") if r["job"] else ("plaza", "looking for a job")
@@ -266,6 +299,8 @@ class City:
         for a in agents:
             r = self.resident(a)
             r["online"] = a["id"] in on
+            if not WAKE_HOUR * 60 <= minute < SLEEP_HOUR * 60:   # bedtime: home, asleep, whatever they'd planned
+                r["plan_until"] = 0
             if r["plan_until"] < now:              # habit takes over between decisions
                 pid, doing = self.routine(r, minute)
                 if not r["online"]:
@@ -282,14 +317,15 @@ class City:
         if self.pending:
             return
         busy = self.busy_ids()
-        awake = 6 * 60 <= minute < 23 * 60
+        awake = WAKE_HOUR * 60 <= minute < SLEEP_HOUR * 60
         due = []
         for a in agents:
             r = self.st["residents"][a["name"]]
             if not r["online"] or a["id"] in busy:
                 continue
             waiting = bool(self.heard.get(a["name"]))
-            if not awake and not waiting:
+            if not awake:                           # asleep: no thinking, and nobody to answer
+                self.heard.pop(a["name"], None)
                 continue
             w = self.wake.setdefault(a["name"], now + random.uniform(5, 40))
             if waiting and now >= min(w, self.heard[a["name"]][-1][2] + random.uniform(*REPLY_DELAY)):
@@ -415,7 +451,8 @@ class City:
         day, minute = self.clock()
         now = time.time()
         return {"running": self.running, "paused": self.paused_reason, "day": day, "minute": minute,
-                "time": self.hhmm(minute), "day_seconds": DAY_SECONDS,
+                "time": self.hhmm(minute), "day_seconds": DAY_SECONDS, "realtime": REALTIME,
+                "sun": self.sun() if REALTIME else [6 * 60, 20 * 60], "wake": WAKE_HOUR, "sleep": SLEEP_HOUR,
                 "places": list(self.st["places"].values()), "roads": ROADS, "size": 24,
                 "residents": [{"name": r["name"], "color": r.get("color"), "online": r.get("online", False),
                                "place": r["place"], "doing": r["doing"], "mood": r["mood"], "job": r["job"],

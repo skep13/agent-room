@@ -372,7 +372,7 @@ function cityMinute() {                     // what to draw: the real time, or a
 }
 function realMinute() {
   if (!city) return 0;
-  const run = city.running ? (performance.now() - clockBase.at) / 1000 * 1440 / city.day_seconds : 0;
+  const run = city.running || city.realtime ? (performance.now() - clockBase.at) / 1000 * 1440 / city.day_seconds : 0;
   return (clockBase.min + run) % 1440;
 }
 
@@ -393,7 +393,8 @@ function frame(t) {
   requestAnimationFrame(frame);
   if (!city) return;
   const minute = cityMinute(), hr = minute / 60;
-  const night = hr < 6 || hr >= 20;
+  const [rise, set] = city.sun || [360, 1200];   // real London sunrise and sunset, from the hub
+  const night = minute < rise - 20 || minute >= set + 20;
   for (const r of ROADS) for (const i of [2.6, 8.6, 14.6, 20.6]) { items0.push({d: r + i, draw: () => lamp(r - .3, i, night)}); }
   const places = Object.fromEntries(city.places.map(p => [p.id, p]));
   const items = items0.splice(0).concat(city.places.map(p => ({d: p.x + p.y + p.w + p.h, draw: () => block(p, night, t)})));
@@ -429,9 +430,10 @@ function frame(t) {
     ctx.ellipse(target[0], target[1] + 6, 3.2 + Math.sin(t / 250) * .4, 1.6, 0, 0, 7); ctx.stroke();
   }
   items.sort((a, b) => a.d - b.d).forEach(i => i.draw());
-  const dark = hr < 5 ? .55 : hr < 7 ? .55 - (hr - 5) * .27 : hr < 18 ? 0 : hr < 21 ? (hr - 18) * .17 : .55;   // day and night
+  const ramp = (a, b, v) => Math.min(1, Math.max(0, (v - a) / (b - a)));
+  const dark = .55 * (1 - ramp(rise - 60, rise + 30, minute)) + .55 * ramp(set - 30, set + 60, minute);   // day and night
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  const tint = hr < 5 || hr >= 21 ? 0 : hr < 7 ? (hr - 5) / 2 : hr < 18 ? 1 : (21 - hr) / 3;   // dawn and dusk glow
+  const tint = minute < rise - 60 || minute > set + 60 ? 0 : Math.min(1, Math.min(Math.abs(minute - rise), Math.abs(minute - set)) / 90);   // dawn and dusk glow
   if (tint < 1 && tint > 0) { ctx.fillStyle = `rgba(255,140,80,${(1 - tint) * .12})`; ctx.fillRect(0, 0, cv.width, cv.height); }
   const dpr = window.devicePixelRatio || 1, fs = Math.max(10, Math.min(13, scale * 4)) * dpr;
   ctx.textAlign = "center";
