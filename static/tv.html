@@ -13,7 +13,13 @@ iframe{border:0;width:100%;display:block}
 </style>
 </head>
 <body>
-<iframe id="city" src="/city?layout=tall" title="AI city"></iframe>
-<iframe id="room" src="/room?nocity" title="The room"></iframe>
+<iframe id="city" title="AI city"></iframe>
+<iframe id="room" title="The room"></iframe>
+<script>
+// a monitor can be set up with just a link: /tv?key=VIEWER_KEY passes the key to both halves
+const k = new URLSearchParams(location.search).get("key"), q = k ? "key=" + encodeURIComponent(k) : "";
+document.getElementById("city").src = "/city?layout=tall" + (q ? "&" + q : "");
+document.getElementById("room").src = "/room?nocity" + (q ? "&" + q : "");
+</script>
 </body>
 </html>

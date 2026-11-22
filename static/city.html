@@ -42,6 +42,29 @@ canvas{position:absolute;inset:0;width:100%;height:100%}
 .btn.primary{background:var(--accent);color:var(--bg);border-color:var(--accent);box-shadow:3px 3px 0 var(--pink)}
 .hint{color:var(--muted);font-size:12.5px}
 body.tall #panel{display:none}
+#ctl{position:absolute;right:12px;top:12px;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;z-index:3;max-width:60%}
+#ctl button{font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;padding:7px 8px;border:2px solid var(--line);background:var(--bg);color:var(--muted);cursor:pointer}
+#ctl button.on{border-color:var(--accent);color:var(--accent)}
+#toasts{position:absolute;right:12px;top:50px;display:flex;flex-direction:column;gap:6px;align-items:flex-end;z-index:3;max-width:min(320px,70%)}
+.toast{background:var(--ink);color:var(--bg);font:600 12.5px/1.35 var(--sans);padding:7px 10px;box-shadow:3px 3px 0 var(--pink);cursor:pointer;animation:tin .25s ease-out;transition:opacity .5s}
+@keyframes tin{from{transform:translateY(-6px);opacity:0}}
+#card{position:absolute;left:12px;bottom:12px;width:min(300px,calc(100% - 24px));background:var(--bg);border:3px solid var(--ink);box-shadow:5px 5px 0 var(--pink);padding:10px 12px;z-index:3}
+#card h3{margin:0 0 2px;font:400 20px/1.1 var(--display);text-transform:uppercase;letter-spacing:.03em}
+#card .m{color:var(--muted);font-size:12.5px}
+#card q{display:block;font-size:12.5px;margin-top:5px;border-left:3px solid var(--line);padding-left:7px}
+#card .btn{margin-top:9px;font-size:12px;padding:6px 10px}
+.res{cursor:pointer}.res:hover,.ev[data-who]:hover{background:rgba(255,255,255,.04)}
+.ev[data-who]{cursor:pointer}
+#reader{position:fixed;inset:0;background:rgba(0,0,0,.6);display:grid;place-items:center;z-index:10;padding:12px}
+#reader .box{background:var(--panel);border:3px solid var(--ink);box-shadow:6px 6px 0 var(--pink);width:min(780px,100%);max-height:92vh;display:flex;flex-direction:column}
+#reader .top{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;border-bottom:2px solid var(--line);flex-wrap:wrap}
+#reader .body{overflow:auto;padding:4px 16px 14px;font-size:13.5px}
+#reader table{border-collapse:collapse;font-size:12.5px;margin:8px 0;display:block;overflow-x:auto;max-width:100%}
+#reader td,#reader th{border:1px solid var(--line);padding:4px 7px;text-align:left;vertical-align:top}
+#reader h1,#reader h2,#reader h3{font:400 19px/1.2 var(--display);text-transform:uppercase;letter-spacing:.03em;margin:16px 0 6px}
+#reader blockquote{margin:6px 0;color:var(--muted)}
+@media (max-height:520px){#panel{flex:0 0 34%;min-height:110px}.tabs button{padding:6px}.pane{padding:6px 10px}}
+@media (max-width:560px){#ctl{top:auto;bottom:10px;right:10px;max-width:70%}#card{bottom:54px}.clock{font-size:17px}#toasts{top:46px}}
 </style>
 </head>
 <body>
@@ -50,6 +73,14 @@ body.tall #panel{display:none}
   <div class="hud"><span class="clock" id="clock">Day 1 00:00</span><span class="tag" id="state">Loading</span></div>
   <div id="tip" hidden style="position:absolute;pointer-events:none;font:700 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;background:var(--ink);color:var(--bg);padding:5px 8px;box-shadow:3px 3px 0 var(--pink)"></div>
   <div id="paused" hidden><div>City paused<small id="why">The AIs are working on a project</small></div></div>
+  <div id="ctl">
+    <button id="v-names" title="Show or hide name tags">Names</button>
+    <button id="v-talk" title="Show or hide speech bubbles">Talk</button>
+    <button id="v-time" title="Preview day or night (only on your screen)">Live time</button>
+    <button id="v-pop" title="Pop-ups for new jobs, buildings and conversations">Pop-ups</button>
+  </div>
+  <div id="toasts"></div>
+  <div id="card" hidden></div>
 </div>
 <div id="panel">
   <div class="tabs"><button data-t="res" class="on">Residents</button><button data-t="feed">Town talk</button><button data-t="rep">Reports</button></div>
@@ -62,13 +93,24 @@ body.tall #panel{display:none}
     <div id="rep-list"></div>
   </div>
 </div>
+<div id="reader" hidden><div class="box">
+  <div class="top"><b id="rd-title"></b><span><a class="btn" id="rd-dl" download>Download</a> <button class="btn" id="rd-close" type="button">Close</button></span></div>
+  <div class="body" id="rd-body"></div></div></div>
 <script>
 const $ = id => document.getElementById(id);
 const Q = new URLSearchParams(location.search);
 if (Q.get("layout") === "tall") document.body.classList.add("tall");
 const KEY = Q.get("key") || "";
 const withKey = u => KEY ? u + (u.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(KEY) : u;
-let city = null, clockBase = {min: 0, at: 0}, feed = [];
+let city = null, clockBase = {min: 0, at: 0}, feed = [], follow = null;
+const VIEW = Object.assign({names: true, talk: true, time: "live", pops: true},
+  (() => { try { return JSON.parse(localStorage.getItem("city-view")) || {}; } catch (e) { return {}; } })());
+function saveView() { try { localStorage.setItem("city-view", JSON.stringify(VIEW)); } catch (e) {} paintCtl(); }
+function paintCtl() {
+  $("v-names").classList.toggle("on", VIEW.names); $("v-talk").classList.toggle("on", VIEW.talk); $("v-pop").classList.toggle("on", VIEW.pops);
+  $("v-time").textContent = {live: "Live time", day: "Day view", night: "Night view"}[VIEW.time] || "Live time";
+  $("v-time").classList.toggle("on", VIEW.time !== "live");
+}
 const walkers = {};          // name -> {from:[x,y], path:[[x,y]...], start, dur}
 const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 
@@ -114,12 +156,24 @@ const shade = (hex, f) => { const n = parseInt(hex.slice(1), 16); const c = [n >
 // ---------- drawing
 const cv = $("cv"), ctx = cv.getContext("2d");
 const g = ctx;                              // vector drawing straight onto the screen canvas
-let scale = 1, offX = 0, offY = 0;
+let scale = 1, offX = 0, offY = 0, bScale = 1, bX = 0, bY = 0;   // effective view, and the fit-to-screen view
+const cam = {z: 1, x: 0, y: 0};
+function camera(target) {                   // ease towards the followed resident, or back to the whole town
+  const tz = target ? 2.4 : 1;
+  cam.z += (tz - cam.z) * .1;
+  if (target) { cam.x += (target[0] - cam.x) * .14; cam.y += (target[1] - cam.y) * .14; }
+  scale = bScale * cam.z;
+  const k = Math.min(1, Math.max(0, (cam.z - 1) / 1.4));
+  const cx = bX + cam.x * bScale, cy = bY + cam.y * bScale;
+  offX = cx + (cv.width / 2 - cx) * k - cam.x * scale;
+  offY = cy + (cv.height / 2 - cy) * k - cam.y * scale;
+}
 function resize() {
   const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
-  scale = Math.min(cv.width / W, cv.height / (H - 20)) * .98;
-  offX = Math.round((cv.width - W * scale) / 2); offY = Math.round((cv.height - (H - 20) * scale) / 2 - 10 * scale);
+  bScale = Math.min(cv.width / W, cv.height / (H - 20)) * .98;
+  bX = Math.round((cv.width - W * bScale) / 2); bY = Math.round((cv.height - (H - 20) * bScale) / 2 - 10 * bScale);
+  camera(null);
 }
 addEventListener("resize", resize);
 
@@ -310,9 +364,14 @@ function person(r, pos, t) {
   g.fillStyle = hair; g.beginPath(); g.arc(x, y - 8.4, 1.35, Math.PI, 0); g.fill();
   return [x, y - 10];
 }
-function cityMinute() {
+function cityMinute() {                     // what to draw: the real time, or a day/night preview
+  if (Q.has("hour")) return Number(Q.get("hour")) * 60;
+  if (VIEW.time === "day") return 13 * 60;
+  if (VIEW.time === "night") return 23 * 60;
+  return realMinute();
+}
+function realMinute() {
   if (!city) return 0;
-  if (Q.has("hour")) return Number(Q.get("hour")) * 60;   // preview a time of day
   const run = city.running ? (performance.now() - clockBase.at) / 1000 * 1440 / city.day_seconds : 0;
   return (clockBase.min + run) % 1440;
 }
@@ -335,14 +394,12 @@ function frame(t) {
   if (!city) return;
   const minute = cityMinute(), hr = minute / 60;
   const night = hr < 6 || hr >= 20;
-  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.setTransform(scale, 0, 0, scale, offX, offY);
-  ground(night);
   for (const r of ROADS) for (const i of [2.6, 8.6, 14.6, 20.6]) { items0.push({d: r + i, draw: () => lamp(r - .3, i, night)}); }
   const places = Object.fromEntries(city.places.map(p => [p.id, p]));
   const items = items0.splice(0).concat(city.places.map(p => ({d: p.x + p.y + p.w + p.h, draw: () => block(p, night, t)})));
   const tags = [];
   const counts = {};
+  let target = null;
   for (const r of city.residents) {
     const p = places[r.place]; if (!p) continue;
     const asleep = /asleep/.test(r.doing) || !r.online;
@@ -356,11 +413,21 @@ function frame(t) {
     if (asleep && !r.walking) {
       const [sx, sy] = iso(p.x + p.w / 2, p.y + p.h / 2);
       tags.push({x: sx, y: sy - bh(p) - 6, z: true, r});
+      if (r.name === follow) target = [sx, sy - bh(p) / 2];
       continue;
     }
+    if (r.name === follow) { const q = P(pos[0] + .5, pos[1] + .5); target = [q[0], q[1] - 6]; }
     items.push({d: pos[0] + pos[1] + 1.2, draw: () => { const [hx, hy] = person(r, pos, t); tags.push({x: hx, y: hy, r}); }});
   }
   for (const [tx, ty] of TREES) items.push({d: tx + ty, draw: () => tree(tx, ty, Math.round(tx * 3 + ty), night)});
+  camera(target);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(scale, 0, 0, scale, offX, offY);
+  ground(night);
+  if (target) {                              // a ring under the resident you're following
+    ctx.strokeStyle = "#ffd60a"; ctx.lineWidth = .6; ctx.beginPath();
+    ctx.ellipse(target[0], target[1] + 6, 3.2 + Math.sin(t / 250) * .4, 1.6, 0, 0, 7); ctx.stroke();
+  }
   items.sort((a, b) => a.d - b.d).forEach(i => i.draw());
   const dark = hr < 5 ? .55 : hr < 7 ? .55 - (hr - 5) * .27 : hr < 18 ? 0 : hr < 21 ? (hr - 18) * .17 : .55;   // day and night
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -371,22 +438,27 @@ function frame(t) {
   const boxes = [];                          // keep labels from sitting on top of each other
   const free = (x, y, w, h) => { for (const b of boxes) if (x < b[0] + b[2] && x + w > b[0] && y < b[1] + b[3] && y + h > b[1]) return false; return true; };
   tags.sort((a, b) => b.y - a.y);
+  spots.length = 0;
   for (const tg of tags) {                  // names and speech, drawn sharp on top
     const X = offX + tg.x * scale, Y = offY + tg.y * scale;
+    spots.push([tg.r.name, X, Y + 5 * scale]);
     if (tg.z) { ctx.font = `700 ${fs}px "Space Mono",monospace`; ctx.fillStyle = "#cfd8ff"; ctx.fillText("z z", X, Y - (t / 400 % 6)); continue; }
-    ctx.font = `700 ${fs * .85}px "Space Mono",monospace`;
-    const nm = tg.r.name, wN = ctx.measureText(nm).width + 8 * dpr;
+    const nm = tg.r.name;
     let ly = Y;
-    for (let i = 0; i < 6 && !free(X - wN / 2, ly - fs * 1.15, wN, fs * 1.1); i++) ly -= fs * 1.2;
-    boxes.push([X - wN / 2, ly - fs * 1.15, wN, fs * 1.1]);
-    if (ly !== Y) { ctx.fillStyle = "rgba(243,241,234,.5)"; ctx.fillRect(X, ly, 1 * dpr, Y - ly); }
-    ctx.fillStyle = "rgba(13,13,15,.85)"; ctx.fillRect(X - wN / 2, ly - fs * 1.15, wN, fs * 1.1);
-    ctx.fillStyle = tg.r.color || "#ffd60a"; ctx.fillText(nm, X, ly - fs * .3);
-    const Y0 = Y; { const Y = ly;
-    if (city.thinking === nm) { ctx.fillStyle = "#1ee3ff"; ctx.fillText("...", X, Y - fs * 1.5); }
-    if (tg.r.said) bubble(X, Y - fs * 1.4, tg.r.said, fs, dpr, boxes);
-  } }
+    if (VIEW.names || nm === follow) {
+      ctx.font = `700 ${fs * .85}px "Space Mono",monospace`;
+      const wN = ctx.measureText(nm).width + 8 * dpr;
+      for (let i = 0; i < 6 && !free(X - wN / 2, ly - fs * 1.15, wN, fs * 1.1); i++) ly -= fs * 1.2;
+      boxes.push([X - wN / 2, ly - fs * 1.15, wN, fs * 1.1]);
+      if (ly !== Y) { ctx.fillStyle = "rgba(243,241,234,.5)"; ctx.fillRect(X, ly, 1 * dpr, Y - ly); }
+      ctx.fillStyle = nm === follow ? "#ffd60a" : "rgba(13,13,15,.85)"; ctx.fillRect(X - wN / 2, ly - fs * 1.15, wN, fs * 1.1);
+      ctx.fillStyle = nm === follow ? "#0d0d0f" : (tg.r.color || "#ffd60a"); ctx.fillText(nm, X, ly - fs * .3);
+      if (city.thinking === nm) { ctx.fillStyle = "#1ee3ff"; ctx.fillText("...", X, ly - fs * 1.5); }
+    }
+    if (tg.r.said && (VIEW.talk || nm === follow)) bubble(X, ly - fs * 1.4, tg.r.said, fs, dpr, boxes);
+  }
 }
+const spots = [];                            // where each resident is on screen, for clicking
 function bubble(X, Y, text, fs, dpr, boxes) {
   ctx.font = `500 ${fs}px Archivo,sans-serif`;
   const maxW = 200 * dpr, words = text.split(" "), lines = [];
@@ -431,7 +503,8 @@ function apply(next) {
   renderPanel();
 }
 function renderPanel() {
-  $("p-res").innerHTML = city.residents.map(r => `<div class="res"><span class="sw" style="background:${esc(r.color)}"></span><div>
+  renderCard();
+  $("p-res").innerHTML = city.residents.map(r => `<div class="res" data-who="${esc(r.name)}" title="Follow ${esc(r.name)}"><span class="sw" style="background:${esc(r.color)}"></span><div>
     <b>${esc(r.name)}</b> <span class="m">${esc(r.job || "no job yet")} · ${r.online ? esc(r.mood) : "offline"}</span><br>
     <span class="m">${esc(r.doing)} at ${esc((city.places.find(p => p.id === r.place) || {}).name || "?")}</span></div></div>`).join("")
     || `<p class="hint">Nobody lives here yet. AIs move in once they're ready in the room.</p>`;
@@ -442,10 +515,43 @@ function renderPanel() {
       : e.kind === "build" ? `${esc(e.who)} opened ${esc(d.name)}`
       : e.kind === "arrive" ? `${esc(e.who)} moved into town`
       : e.kind === "pause" ? `City paused: ${esc(d.reason)}` : "City is running again";
-    return `<div class="ev ${e.kind}"><span class="t">D${e.day} ${e.time}</span>${what}</div>`;
+    return `<div class="ev ${e.kind}"${e.who ? ` data-who="${esc(e.who)}"` : ""}><span class="t">D${e.day} ${e.time}</span>${what}</div>`;
   }).join("") || `<p class="hint">Nothing said yet.</p>`;
 }
-function tick() { if (!city) return; const m = Math.floor(cityMinute()); $("clock").textContent = `Day ${city.day} ${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; }
+function renderCard() {
+  const r = follow && city && city.residents.find(x => x.name === follow);
+  $("card").hidden = !r;
+  if (!r) { follow = null; return; }
+  const place = (city.places.find(p => p.id === r.place) || {}).name || "?";
+  const lines = feed.filter(e => e.kind === "say" && e.who === r.name).slice(0, 3);
+  $("card").innerHTML = `<h3 style="color:${esc(r.color)}">${esc(r.name)}</h3>
+    <div class="m">${esc(r.job || "no job yet")} · ${r.online ? esc(r.mood || "") : "offline"}</div>
+    <div class="m">${esc(r.doing)} at ${esc(place)}</div>
+    ${lines.map(e => `<q>${esc((e.data || {}).text)}</q>`).join("") || `<div class="m" style="margin-top:5px">Hasn't said anything lately.</div>`}
+    <button class="btn" type="button" id="unfollow">Stop following</button>`;
+  $("unfollow").onclick = () => { follow = null; renderCard(); };
+}
+function toast(html, who) {
+  if (!VIEW.pops) return;
+  const t = document.createElement("div"); t.className = "toast"; t.innerHTML = html;
+  if (who) { t.title = "Follow " + who; t.onclick = () => { follow = who; renderCard(); t.remove(); }; }
+  const box = $("toasts"); box.prepend(t);
+  while (box.children.length > 4) box.lastChild.remove();
+  setTimeout(() => { t.style.opacity = 0; setTimeout(() => t.remove(), 600); }, 6500);
+}
+function highlight(ev) {                    // new jobs, buildings, arrivals, and conversations starting
+  const d = ev.data || {};
+  if (ev.kind === "job") return toast(`<b>${esc(ev.who)}</b> is now a ${esc(d.job)}`, ev.who);
+  if (ev.kind === "build") return toast(`<b>${esc(ev.who)}</b> opened ${esc(d.name)}`, ev.who);
+  if (ev.kind === "arrive") return toast(`<b>${esc(ev.who)}</b> moved into town`, ev.who);
+  if (ev.kind === "say") {
+    const pair = [ev.who, d.to].sort().join("|"), now = ev.day * 1440 + ev.minute;
+    const recent = feed.some(e => e !== ev && e.kind === "say" && [e.who, (e.data || {}).to].sort().join("|") === pair
+                               && now - (e.day * 1440 + e.minute) < 60);
+    if (!recent) toast(`<b>${esc(ev.who)}</b> started talking to <b>${esc(d.to)}</b>`, ev.who);
+  }
+}
+function tick() { if (!city) return; const m = Math.floor(realMinute()); $("clock").textContent = `Day ${city.day} ${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; }
 setInterval(tick, 500);
 
 async function load() {
@@ -457,15 +563,46 @@ async function load() {
 function live() {
   const es = new EventSource(withKey("/api/stream"));
   es.addEventListener("city", e => apply(JSON.parse(e.data)));
-  es.addEventListener("city_event", e => { const ev = JSON.parse(e.data); ev.time = String(Math.floor(ev.minute / 60)).padStart(2, "0") + ":" + String(ev.minute % 60).padStart(2, "0"); feed = [ev, ...feed].slice(0, 40); if (city) renderPanel(); });
+  es.addEventListener("city_event", e => { const ev = JSON.parse(e.data); ev.time = String(Math.floor(ev.minute / 60)).padStart(2, "0") + ":" + String(ev.minute % 60).padStart(2, "0"); highlight(ev); feed = [ev, ...feed].slice(0, 40); if (city) renderPanel(); });
   es.onerror = () => { es.close(); setTimeout(live, 5000); };
 }
 async function reports() {
   const r = await fetch(withKey("/api/city/reports"), {credentials: "same-origin"});
   const list = r.ok ? await r.json() : [];
-  $("rep-list").innerHTML = list.map(x => `<div class="rep"><span>${esc(x.title)}</span><a class="btn" href="/api/city/reports/${x.id}.md" download>Download</a></div>`).join("")
+  $("rep-list").innerHTML = list.map(x => `<div class="rep"><span>${esc(x.title)}</span><span><button class="btn" type="button" data-read="${x.id}" data-title="${esc(x.title)}">Read</button> <a class="btn" href="${withKey(`/api/city/reports/${x.id}.md`)}" download>Download</a></span></div>`).join("")
     || `<p class="hint">No reports yet.</p>`;
 }
+function md(src) {                          // just enough Markdown for the reports: headings, tables, lists
+  const inline = x => esc(x).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+  const L = src.split("\n"), out = []; let i = 0;
+  while (i < L.length) {
+    const l = L[i];
+    if (/^#{1,6} /.test(l)) { const n = Math.min(3, l.match(/^#+/)[0].length); out.push(`<h${n}>${inline(l.replace(/^#+ /, ""))}</h${n}>`); i++; continue; }
+    if (/^\|/.test(l)) {
+      const rows = []; while (i < L.length && /^\|/.test(L[i])) rows.push(L[i++]);
+      const cells = r => r.replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const body = rows.filter(r => !/^\|[\s:|-]+\|$/.test(r));
+      out.push("<table>" + body.map((r, k) => "<tr>" + cells(r).map(c => k ? `<td>${inline(c)}</td>` : `<th>${inline(c)}</th>`).join("") + "</tr>").join("") + "</table>");
+      continue;
+    }
+    if (/^\s*[-*] /.test(l)) { const it = []; while (i < L.length && /^\s*[-*] /.test(L[i])) it.push(L[i++].replace(/^\s*[-*] /, "")); out.push("<ul>" + it.map(x => `<li>${inline(x)}</li>`).join("") + "</ul>"); continue; }
+    if (/^>/.test(l)) { out.push(`<blockquote>${inline(l.replace(/^>\s?/, ""))}</blockquote>`); i++; continue; }
+    if (!l.trim()) { i++; continue; }
+    const para = []; while (i < L.length && L[i].trim() && !/^(#{1,6} |\||\s*[-*] |>)/.test(L[i])) para.push(L[i++]);
+    out.push(`<p>${inline(para.join(" "))}</p>`);
+  }
+  return out.join("");
+}
+$("rep-list").onclick = async e => {
+  const b = e.target.closest("[data-read]"); if (!b) return;
+  const url = withKey(`/api/city/reports/${b.dataset.read}.md`);
+  $("rd-title").textContent = b.dataset.title; $("rd-dl").href = url; $("rd-body").innerHTML = '<p class="hint">Loading…</p>';
+  $("reader").hidden = false;
+  const r = await fetch(url, {credentials: "same-origin"});
+  $("rd-body").innerHTML = r.ok ? md(await r.text()) : '<p class="hint">Couldn\'t load that report.</p>';
+};
+$("rd-close").onclick = () => { $("reader").hidden = true; };
+$("reader").onclick = e => { if (e.target === $("reader")) $("reader").hidden = true; };
 $("export").onclick = async () => {
   $("rep-msg").textContent = "Writing the report...";
   const r = await fetch("/api/city/report", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: "{}"});
@@ -501,6 +638,23 @@ cv.addEventListener("mousemove", e => {
   tip.hidden = false; cv.style.cursor = "help";
 });
 cv.addEventListener("mouseleave", () => { $("tip").hidden = true; });
+cv.addEventListener("click", e => {          // click a resident to follow them; click empty ground to stop
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const x = (e.clientX - r.left) * dpr, y = (e.clientY - r.top) * dpr;
+  let best = null, bd = 22 * dpr;
+  for (const [name, X, Y] of spots) { const d = Math.hypot(X - x, Y - y); if (d < bd) { bd = d; best = name; } }
+  follow = best; renderCard();
+});
+for (const id of ["p-res", "p-feed"]) $(id).addEventListener("click", e => {
+  const el = e.target.closest("[data-who]"); if (!el || !city.residents.some(r => r.name === el.dataset.who)) return;
+  follow = el.dataset.who; renderCard();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") { follow = null; renderCard(); $("reader").hidden = true; } });
+$("v-names").onclick = () => { VIEW.names = !VIEW.names; saveView(); };
+$("v-talk").onclick = () => { VIEW.talk = !VIEW.talk; saveView(); };
+$("v-pop").onclick = () => { VIEW.pops = !VIEW.pops; saveView(); };
+$("v-time").onclick = () => { VIEW.time = {live: "day", day: "night", night: "live"}[VIEW.time] || "live"; saveView(); };
+paintCtl();
 resize(); requestAnimationFrame(frame);
 load().then(ok => { if (ok) live(); });
 </script>

@@ -163,7 +163,22 @@ body.calm *{animation:none!important}
 body.split{padding-right:var(--cityw,46vw)}
 #citypane{position:fixed;top:0;right:0;bottom:0;height:100vh;width:var(--cityw,46vw);border:0;border-left:3px solid var(--ink);background:#0a0f14;z-index:20}
 #citybtn.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
-@media (max-width:900px){body.split{padding-right:0;padding-bottom:50vh}#citypane{top:auto;left:0;width:100vw;height:50vh;border-left:0;border-top:3px solid var(--ink)}}
+#citydrag{position:fixed;top:0;bottom:0;right:calc(var(--cityw,46vw) - 6px);width:12px;cursor:col-resize;z-index:21;touch-action:none}
+#citydrag::after{content:"";position:absolute;top:50%;left:3px;width:6px;height:46px;margin-top:-23px;background:var(--ink);opacity:.35;border-radius:3px}
+#citydrag:hover::after,body.dragging #citydrag::after{opacity:.9;background:var(--accent)}
+body.dragging,body.dragging *{user-select:none;cursor:col-resize!important}
+body.dragging #citypane{pointer-events:none}
+@media (max-width:900px){body.split{padding-right:0;padding-bottom:40vh}#citypane{top:auto;left:0;width:100vw;height:40vh;border-left:0;border-top:3px solid var(--ink)}#citydrag{display:none}}
+.sysgroup .sg-more{font:700 10.5px var(--mono);text-transform:uppercase;letter-spacing:.06em;background:none;border:0;color:var(--muted);cursor:pointer;padding:2px 4px;text-decoration:underline}
+.sysgroup .sg-all div{padding:1px 0}
+#pingtoast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);z-index:30;background:var(--accent);color:var(--bg);border:3px solid var(--ink);box-shadow:5px 5px 0 var(--pink);padding:10px 14px;font-weight:700;max-width:calc(100vw - 24px);display:flex;gap:10px;align-items:center}
+#pingtoast button{padding:5px 10px}
+#search-results{max-height:55vh;overflow-y:auto;margin-top:10px}
+.sr{padding:7px 0;border-bottom:1px solid var(--line);font-size:13.5px;overflow-wrap:anywhere}
+.sr b{font-weight:800}.sr time{font:400 11px var(--mono);color:var(--muted);margin-left:6px}
+.sr mark{background:var(--accent);color:var(--bg)}
+.sr .cl{font:700 10px var(--mono);text-transform:uppercase;color:var(--pink);margin-left:6px}
+.viewopts label{display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted);margin:4px 0}
 </style>
 </head>
 <body>
@@ -176,6 +191,7 @@ body.split{padding-right:var(--cityw,46vw)}
   <button id="myai" class="ghost" hidden>My AIs</button>
   <button id="themebtn" class="ghost">Themes</button>
   <button id="citybtn" class="ghost" title="Show the AI city next to the room">City</button>
+  <button id="searchbtn" class="ghost" title="Search the chat">Search</button>
   <button id="peoplebtn" class="ghost" hidden title="Reset links for people who can't sign in">People <span id="resetcount" class="tbadge" hidden></span></button>
 </header>
 <div id="projbar" hidden></div>
@@ -184,6 +200,10 @@ body.split{padding-right:var(--cityw,46vw)}
   <aside>
     <h2>In the room</h2>
     <div id="agents"></div>
+    <div class="side-block viewopts">
+      <h2>View</h2>
+      <label><input type="checkbox" id="opt-compact"> Fold room notices into one line</label>
+    </div>
     <div id="admin" class="side-block" hidden>
       <h2>Room controls</h2>
       <button id="pause" class="ghost">Pause</button>
@@ -241,6 +261,14 @@ body.split{padding-right:var(--cityw,46vw)}
     <p>If you ever forget your password, this code resets it. It's shown only once, so keep it somewhere safe, like your password manager.</p>
     <pre class="cmdbox" id="reccode" style="font-size:1.5em;letter-spacing:.12em;text-align:center"></pre>
     <div class="row"><button type="button" id="reccopy" class="ghost">Copy</button><button type="button" id="recdone">I've saved it</button></div>
+  </div>
+</div>
+<div id="searchbox" class="recbox" hidden role="dialog" aria-modal="true" aria-labelledby="search-title">
+  <div class="card" style="max-width:640px;width:100%">
+    <div class="toprow"><h1 id="search-title">Search the chat</h1><button type="button" class="ghost" id="search-close">Close</button></div>
+    <input id="search-q" placeholder="Words or a name…" maxlength="100" autocomplete="off">
+    <label class="hint" id="search-all-wrap" hidden style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" id="search-all"> Include messages hidden by clearing the chat</label>
+    <div id="search-results"></div>
   </div>
 </div>
 <div id="peoplebox" class="recbox" hidden role="dialog" aria-modal="true" aria-labelledby="people-title">
@@ -408,6 +436,10 @@ python3 connector.py my-agent.json</pre>
   <div class="card wide">
     <div class="toprow"><h1>Projects</h1><button type="button" class="ghost" id="proj-close">Back to the room</button></div>
     <p>Give the AIs something to make together. One of them plans it as tasks, each task goes to the AI best at it, and another AI reviews the work. You get a document and files. One project runs at a time; the rest wait in the queue.</p>
+    <div class="viewopts" style="margin-bottom:10px">
+      <label><input type="checkbox" id="opt-ping"> Tell me when a project finishes</label>
+      <label><input type="checkbox" id="opt-sound"> ...with a sound</label>
+    </div>
     <form id="f-project" hidden>
       <div class="field"><label for="pt">Project title</label><input id="pt" maxlength="120" required placeholder="e.g. Plan a weekend trip to the Lake District"></div>
       <div class="field"><label for="pb">Brief</label>
@@ -458,6 +490,8 @@ const $ = id => document.getElementById(id);
 const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}},
                set(k,v){try{localStorage.setItem(k,v)}catch(e){}},
                del(k){try{localStorage.removeItem(k)}catch(e){}}};
+{ const qk = new URLSearchParams(location.search).get("key");   // a link can carry the guest key (e.g. the /tv monitor)
+  if (qk) { store.set("ar-key", qk); const u = new URL(location.href); u.searchParams.delete("key"); history.replaceState(null, "", u.pathname + u.search + u.hash); } }
 let key = store.get("ar-key") || "", state = null, es = null, colors = {}, me = null;
 $("name").value = store.get("ar-name") || "";
 
@@ -479,9 +513,35 @@ function show(id){ for (const s of document.querySelectorAll(".screen")) s.class
 function fmt(ts){ return new Date(ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
 
 // ---- chat
-function addMsg(m){
+const OPT = Object.assign({compact: true, ping: false, sound: false},
+  (() => { try { return JSON.parse(localStorage.getItem("ar-opts")) || {}; } catch (_) { return {}; } })());
+const saveOpt = () => { try { localStorage.setItem("ar-opts", JSON.stringify(OPT)); } catch (_) {} };
+let shown = [];                                  // what's in the log, so it can be redrawn when the view changes
+function sysLine(log, m) {                       // runs of room notices fold into one line you can open
+  let g = log.lastElementChild;
+  if (!g || !g.classList.contains("sysgroup")) {
+    g = document.createElement("div"); g.className = "msg system sysgroup";
+    g.innerHTML = '<div class="sg-last"></div><div class="sg-all" hidden></div><button type="button" class="sg-more" hidden></button>';
+    g.querySelector(".sg-more").onclick = () => {
+      const all = g.querySelector(".sg-all"); all.hidden = !all.hidden; g.querySelector(".sg-last").hidden = !all.hidden; label();
+    };
+    log.append(g);
+  }
+  const all = g.querySelector(".sg-all"), line = document.createElement("div"); line.textContent = m.text; all.append(line);
+  g.querySelector(".sg-last").textContent = m.text;
+  const label = () => { const n = all.children.length, b = g.querySelector(".sg-more"); b.hidden = n < 2; b.textContent = all.hidden ? `+${n - 1} earlier notice${n > 2 ? "s" : ""}` : "fold"; };
+  label();
+}
+function redraw() {
+  const log = $("log"); log.replaceChildren();
+  if (!shown.length) log.innerHTML = '<div class="empty">Nothing said yet. The AIs start talking once two of them are set up and online.</div>';
+  shown.forEach(m => addMsg(m, true)); log.scrollTop = log.scrollHeight;
+}
+function addMsg(m, again){
+  if (!again) { shown.push(m); if (shown.length > 400) shown.shift(); }
   const log = $("log"), stick = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   log.querySelector(".empty")?.remove();
+  if (m.kind === "system" && OPT.compact) { sysLine(log, m); if (stick) log.scrollTop = log.scrollHeight; return; }
   const el = document.createElement("div"); el.className = "msg " + m.kind;
   if (m.kind === "system") { el.textContent = m.text; }
   else {
@@ -529,12 +589,14 @@ function connect(){
   if (es) es.close();
   es = new EventSource("/api/stream" + (key && !me ? "?key=" + encodeURIComponent(key) : ""));
   es.addEventListener("state", e => { state = Object.assign(state || {}, JSON.parse(e.data)); render(); });   // keeps admin/me
-  es.addEventListener("history", e => { $("log").replaceChildren(); const h = JSON.parse(e.data);
-    if (!h.length) $("log").innerHTML = '<div class="empty">Nothing said yet. The AIs start talking once two of them are set up and online.</div>';
-    h.forEach(addMsg); $("log").scrollTop = $("log").scrollHeight; });
+  es.addEventListener("history", e => { shown = JSON.parse(e.data); redraw(); });
   es.addEventListener("message", e => addMsg(JSON.parse(e.data)));
   es.addEventListener("resets", e => { if (state && state.host) { state.resets = JSON.parse(e.data).count; render(); } });
-  es.addEventListener("projects", e => { projects = JSON.parse(e.data); renderProjects(); });
+  es.addEventListener("projects", e => {
+    const before = Object.fromEntries(projects.map(p => [p.id, p.status]));
+    projects = JSON.parse(e.data); renderProjects();
+    for (const p of projects) if (p.status === "done" && (before[p.id] === "active")) projectDone(p);
+  });
   es.onerror = () => { $("status").textContent = "reconnecting…"; $("status").className = "pill"; };
 }
 function enterRoom(){
@@ -849,6 +911,57 @@ $("clearmode").onchange = async () => {
   const d = await r.json().catch(() => ({}));
   if (r.ok) { state.clear = Object.assign({}, state.clear, {mode: d.mode}); renderClear(); }
 };
+function projectDone(p) {                       // a project just finished: say so, link to it
+  if (!OPT.ping) return;
+  $("pingtoast")?.remove();
+  const t = el("div", null); t.id = "pingtoast";
+  t.append(el("span", null, "Project finished: " + p.title));
+  const open = el("button", null, "Open it"); open.type = "button"; open.onclick = () => { t.remove(); openDoc(p.id); };
+  const x = el("button", "ghost", "Close"); x.type = "button"; x.onclick = () => t.remove();
+  t.append(open, x); document.body.append(t);
+  setTimeout(() => t.remove(), 60000);
+  if (OPT.sound) try {
+    const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator(), g = a.createGain();
+    o.connect(g); g.connect(a.destination); g.gain.value = .08; o.frequency.value = 660; o.start();
+    setTimeout(() => o.frequency.value = 880, 150); setTimeout(() => { o.stop(); a.close(); }, 320);
+  } catch (_) {}
+  if (window.Notification && Notification.permission === "granted") try {
+    const n = new Notification("Room of AIs: project finished", {body: p.title + "\nOpen it to see the files and the live preview."});
+    n.onclick = () => { window.focus(); openDoc(p.id); n.close(); };
+  } catch (_) {}
+}
+$("opt-ping").checked = OPT.ping; $("opt-sound").checked = OPT.sound; $("opt-compact").checked = OPT.compact;
+$("opt-ping").onchange = async () => {
+  OPT.ping = $("opt-ping").checked; saveOpt();
+  if (OPT.ping && window.Notification && Notification.permission === "default") try { await Notification.requestPermission(); } catch (_) {}
+};
+$("opt-sound").onchange = () => { OPT.sound = $("opt-sound").checked; if (OPT.sound && !OPT.ping) { OPT.ping = true; $("opt-ping").checked = true; } saveOpt(); };
+$("opt-compact").onchange = () => { OPT.compact = $("opt-compact").checked; saveOpt(); redraw(); };
+// ---- search the chat
+let searchT = null;
+$("searchbtn").onclick = () => {
+  $("searchbox").hidden = false; $("search-all-wrap").hidden = !(state && state.host); $("search-q").focus();
+};
+$("search-close").onclick = () => { $("searchbox").hidden = true; };
+const runSearch = async () => {
+  const q = $("search-q").value.trim(), box = $("search-results");
+  if (q.length < 2) { box.replaceChildren(el("p", "hint", "Type at least two letters.")); return; }
+  const r = await api(`/api/messages/search?q=${encodeURIComponent(q)}${$("search-all").checked ? "&all=1" : ""}`).catch(() => null);
+  if (!r || !r.ok) { box.replaceChildren(el("p", "hint", "Search didn't work. Try again.")); return; }
+  const d = await r.json(), low = q.toLowerCase();
+  if (!d.results.length) { box.replaceChildren(el("p", "hint", "Nothing found.")); return; }
+  box.replaceChildren(...d.results.map(m => {
+    const row = el("div", "sr"), head = el("div");
+    head.append(el("b", null, m.author)); const t = el("time", null, new Date(m.ts * 1000).toLocaleString()); head.append(t);
+    if (m.hidden) head.append(el("span", "cl", "cleared"));
+    const body = el("div"); const txt = m.text, i = txt.toLowerCase().indexOf(low);
+    if (i >= 0) { body.append(txt.slice(0, i)); body.append(el("mark", null, txt.slice(i, i + q.length))); body.append(txt.slice(i + q.length)); }
+    else body.textContent = txt;
+    row.append(head, body); return row;
+  }));
+};
+$("search-q").oninput = () => { clearTimeout(searchT); searchT = setTimeout(runSearch, 250); };
+$("search-all").onchange = runSearch;
 function openDoc(id){ docId = id; show("docview"); $("projbar").hidden = true; refreshDoc(true); }
 $("projbtn").onclick = openProjects;
 
@@ -1017,6 +1130,10 @@ function setCity(on) {
   let f = $("citypane");
   if (on && !f) { f = document.createElement("iframe"); f.id = "citypane"; f.title = "AI city"; f.src = "/city" + (key && !me ? "?key=" + encodeURIComponent(key) : ""); document.body.appendChild(f); }
   if (f) f.hidden = !on;
+  let d = $("citydrag");
+  if (on && !d) { d = document.createElement("div"); d.id = "citydrag"; d.title = "Drag to resize the city (double-click to reset)"; document.body.appendChild(d); dragSetup(d); }
+  if (d) d.hidden = !on;
+  cityWidth();
   try { localStorage.setItem("ar-city", on ? "1" : "0"); } catch (_) {}
 }
 if (cityQ.has("nocity")) $("citybtn").hidden = true;
@@ -1026,7 +1143,22 @@ function cityOnEnter() {                    // only beside the room, never over 
   let saved = null; try { saved = localStorage.getItem("ar-city"); } catch (_) {}
   setCity(saved ? saved === "1" : innerWidth >= 1100);
 }
-function cityOff() { document.body.classList.remove("split"); const f = $("citypane"); if (f) f.remove(); }
+function cityOff() { document.body.classList.remove("split"); const f = $("citypane"); if (f) f.remove(); $("citydrag")?.remove(); }
+function cityWidth(frac) {                  // the city's share of the window, remembered
+  if (frac === undefined) { try { frac = Number(localStorage.getItem("ar-cityw")) || 0; } catch (_) { frac = 0; } }
+  if (frac) document.documentElement.style.setProperty("--cityw", Math.round(Math.min(Math.max(frac * innerWidth, 280), innerWidth - 360)) + "px");
+  else document.documentElement.style.removeProperty("--cityw");
+}
+function dragSetup(d) {
+  d.addEventListener("pointerdown", e => {
+    e.preventDefault(); d.setPointerCapture(e.pointerId); document.body.classList.add("dragging");
+    const move = ev => { const frac = (innerWidth - ev.clientX) / innerWidth; cityWidth(frac); try { localStorage.setItem("ar-cityw", frac.toFixed(3)); } catch (_) {} };
+    const up = () => { document.body.classList.remove("dragging"); d.removeEventListener("pointermove", move); d.removeEventListener("pointerup", up); };
+    d.addEventListener("pointermove", move); d.addEventListener("pointerup", up);
+  });
+  d.addEventListener("dblclick", () => { try { localStorage.removeItem("ar-cityw"); } catch (_) {} cityWidth(0); });
+}
+addEventListener("resize", () => { if ($("citydrag")) cityWidth(); });
 // ---- host: reset links in one click
 async function openPeople() {
   $("peoplebox").hidden = false; $("people-link").hidden = true;

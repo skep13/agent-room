@@ -128,6 +128,7 @@ def clean_theme(tokens):
 USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 COLORS = ["#e07a5f", "#3d9a8b", "#7b6cd9", "#d4a017", "#4a90d9", "#c2577a", "#6a994e"]
+NAME_RE = re.compile(r"\[name\](.*?)\[/name\]", re.S | re.I)
 DOC_RE = re.compile(r"\[doc\](.*?)(?:\[/doc\]|\Z)", re.S | re.I)   # unclosed block runs to the end
 DONE_RE = re.compile(r"\[done\]", re.I)
 TASK_RE = re.compile(r"\[task\b([^\]]*)\](.*?)(?:\[/task\]|(?=\[task\b)|\Z)", re.S | re.I)
@@ -999,6 +1000,9 @@ class Room:
         if kind == "plan":
             guide = PLAN_GUIDE.format(name=name, max_tasks=int(self.s.num("max_tasks")), skills=", ".join(SKILLS))
             body = f"{head}\n\nThe AIs who can take tasks:\n{self.roster([x for x in everyone if x['ready']])}"
+            if p.get("created_by") == "room":
+                body += ("\n\nThis project was started from a chat topic, so it has no proper name yet. Before the tasks, "
+                         "give it a short name (2-5 words) like this: [name]Movie Watchlist App[/name]")
             said = self.chat_before(p)
             if said:
                 body += ("\n\nWhat was said in the room's chat just before this project started. If they "
@@ -1204,7 +1208,13 @@ class Room:
             for i, (title, detail, skill, after) in enumerate(found, 1):
                 self.s.add_task(p["id"], title or f"Task {i}", detail, skill,
                                 after if 0 < after < i else 0, added_by=agent["name"])
-            chat = TASK_RE.sub("", text).strip()
+            nm = NAME_RE.search(text)
+            if nm and p.get("created_by") == "room":   # the planner names projects the room started itself
+                name = re.sub(r"[\s*#_`]+", " ", nm.group(1)).strip()[:80]
+                if 2 <= len(name):
+                    self.s.q("UPDATE projects SET title=? WHERE id=?", (name, p["id"]))
+                    self.post("system", "room", f"{agent['name']} named the project: {name}")
+            chat = NAME_RE.sub("", TASK_RE.sub("", text)).strip()
             self.post("agent", agent["name"], (chat[:500] + "\n" if chat else "") +
                       f"[planned {len(found)} tasks: " + "; ".join(f[0] for f in found)[:600] + "]")
             return self.project_event()
@@ -1838,6 +1848,20 @@ class Handler(BaseHTTPRequestHandler):
                                        resets=resets, clear=clear))
         if p == "/api/messages":
             return self.send(200, self.room.s.recent(200))
+        if p == "/api/messages/search":              # search the chat; the host can include cleared messages
+            qs = parse_qs(urlparse(self.path).query)
+            q = (qs.get("q", [""])[0] or "").strip()[:100]
+            if len(q) < 2:
+                return self.send(200, {"results": [], "cleared_at": 0})
+            s = self.room.s
+            cleared = float(s.get("chat_cleared_at") or 0)
+            host = self.is_host(role, x if role == "owner" else None)
+            every = host and qs.get("all", ["0"])[0] == "1"
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            rows = s.q("""SELECT id, kind, author, text, ts FROM messages WHERE (text LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\')
+                          AND ts>? ORDER BY id DESC LIMIT 100""", (like, like, 0 if every else cleared)).fetchall()
+            return self.send(200, {"results": [dict(r, hidden=r["ts"] <= cleared) for r in rows], "cleared_at": cleared,
+                                   "can_all": host})
         if p == "/api/stream":
             return self.stream()
         if p == "/api/city":

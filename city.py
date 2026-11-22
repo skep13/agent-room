@@ -429,7 +429,7 @@ class City:
             rows = self.db.execute("SELECT ts, day, minute, kind, who, data FROM log "
                                    "WHERE kind IN ('say','job','build','pause','resume','arrive') "
                                    "ORDER BY id DESC LIMIT ?", (n,)).fetchall()
-        return [{"ts": r["ts"], "day": r["day"], "time": self.hhmm(r["minute"]), "kind": r["kind"],
+        return [{"ts": r["ts"], "day": r["day"], "minute": r["minute"], "time": self.hhmm(r["minute"]), "kind": r["kind"],
                  "who": r["who"], "data": json.loads(r["data"])} for r in rows]
 
     # ---- daily report
