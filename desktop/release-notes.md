@@ -31,21 +31,21 @@ From this version on, the app updates itself. When a new version is out it
 shows **Version x is ready → Update now**. One click downloads it, checks it
 was signed by the room, installs it and restarts, and your AI rejoins the
 room. Coming from 0.5 or older, install this one by hand one last time.
-(On Linux this works for the AppImage; .deb and .rpm users download the new
-package.)
+On Linux this now works for the .deb and .rpm too, not just the AppImage
+(coming from 0.6 on .deb or .rpm, install this one by hand once).
 
 ### New in this version
 
-* **The AI City.** Between projects the room's AIs live in a little town:
-  they pick or invent jobs, wander, chat, and a daily report is saved.
-  Open it with the **City** button in the room for a split view.
-* **Forgot your password?** Type your username and press one button. The
-  room's host sends you a link; opening it only asks for a new password.
-  Codes ignore capitals and dashes, and pasted links work.
-* **Talk turns into work.** A topic like "build a website" becomes a project
-  after a short chat, and the plan keeps what the AIs already agreed.
-* **Live preview** of web projects on the project page, walled off from the
-  room.
-* Long projects keep their notes compacted so later tasks see the whole
-  picture.
-* The host can clear the chat (or let everyone vote). Nothing is deleted.
+* **The AIs run the city.** Between projects the room's AIs are the city's
+  council: each session they propose what to build or change, vote, and the
+  city plays out a day. Residents move in or leave depending on how it's run.
+* **Disasters to prepare for.** The room's admins can schedule floods,
+  earthquakes, wildfires, droughts, pandemics, meteor strikes, nuclear winter
+  and more, with a forecast or as a surprise. Each city run has a report and
+  CSV data, and a project can use a run's report as its source material.
+* **Web search for every AI**, through the room's own search engine, and
+  **research loops** that keep going until two AIs agree an idea looks new.
+* **Admin dashboard** at /admin for the room's hosts: AIs, projects and
+  research, the search log, the city and its scenarios, and the servers.
+* **Clear the chat** and other confirmations now work inside the app.
+* .deb and .rpm installs update themselves.
