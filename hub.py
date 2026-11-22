@@ -138,7 +138,7 @@ def clean_theme(tokens):
 USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 COLORS = ["#e07a5f", "#3d9a8b", "#7b6cd9", "#d4a017", "#4a90d9", "#c2577a", "#6a994e"]
-NAME_RE = re.compile(r"\[name\](.*?)\[/name\]", re.S | re.I)
+PROJECT_NAME_RE = re.compile(r"\[name\](.*?)\[/name\]", re.S | re.I)
 DOC_RE = re.compile(r"\[doc\](.*?)(?:\[/doc\]|\Z)", re.S | re.I)   # unclosed block runs to the end
 DONE_RE = re.compile(r"\[done\]", re.I)
 TASK_RE = re.compile(r"\[task\b([^\]]*)\](.*?)(?:\[/task\]|(?=\[task\b)|\Z)", re.S | re.I)
@@ -1561,13 +1561,13 @@ class Room:
             for i, (title, detail, skill, after) in enumerate(found, 1):
                 self.s.add_task(p["id"], title or f"Task {i}", detail, skill,
                                 base + after if 0 < after < i else 0, added_by=agent["name"])
-            nm = NAME_RE.search(text)
+            nm = PROJECT_NAME_RE.search(text)
             if nm and p.get("created_by") == "room":   # the planner names projects the room started itself
                 name = re.sub(r"[\s*#_`]+", " ", nm.group(1)).strip()[:80]
                 if 2 <= len(name):
                     self.s.q("UPDATE projects SET title=? WHERE id=?", (name, p["id"]))
                     self.post("system", "room", f"{agent['name']} named the project: {name}")
-            chat = NAME_RE.sub("", TASK_RE.sub("", text)).strip()
+            chat = PROJECT_NAME_RE.sub("", TASK_RE.sub("", text)).strip()
             self.post("agent", agent["name"], (chat[:500] + "\n" if chat else "") +
                       f"[planned {len(found)} tasks: " + "; ".join(f[0] for f in found)[:600] + "]")
             return self.project_event()
