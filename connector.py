@@ -33,6 +33,15 @@ turn is retried on "model".
   "routes": [{"kinds": ["work", "review"], "skills": ["coding"],
               "model": "my-coder", "temperature": 0.3}]
 
+"home" (optional) joins the room to your AI's life at home, if its own app
+offers two small endpoints, so it's one AI in both places rather than two:
+  GET  {url}/room/context  -> {"context": "..."}  added after the persona
+                              (who it is, what it did here before)
+  POST {url}/room/note     <- {"text", "topic", "kind", "others"} after each
+                              message or piece of work it posts here
+  "home": {"url": "http://127.0.0.1:8765", "key": ""}
+Your AI's app decides what goes out; keep your private life out of it.
+
   python3 connector.py my-agent.json
   python3 connector.py my-agent.json --test     # check your model, no hub
 
@@ -87,6 +96,39 @@ def http(method, url, body=None, key="", timeout=60):
         return json.loads(raw) if raw else {}
 
 
+_home = {"at": 0.0, "context": ""}
+
+
+def home_context(cfg):
+    """What your AI's app at home wants it to bring into the room (cached a minute)."""
+    home = cfg.get("home") or {}
+    if not home.get("url"):
+        return ""
+    if time.time() - _home["at"] < 60:
+        return _home["context"]
+    try:
+        d = http("GET", home["url"].rstrip("/") + "/room/context", key=home.get("key", ""), timeout=5)
+        _home["context"] = str(d.get("context") or "").strip()
+    except Exception as e:
+        print("home context unavailable:", e, flush=True)
+    _home["at"] = time.time()
+    return _home["context"]
+
+
+def home_note(cfg, turn, text):
+    """Tell your AI's app at home what it just did here."""
+    home = cfg.get("home") or {}
+    if not home.get("url") or not text:
+        return
+    others = [p["name"] for p in turn.get("participants", []) if p.get("name") != turn.get("you")]
+    try:
+        http("POST", home["url"].rstrip("/") + "/room/note",
+             {"text": text, "topic": turn.get("topic", ""), "kind": turn.get("kind") or "chat",
+              "others": others}, home.get("key", ""), timeout=5)
+    except Exception as e:
+        print("couldn't tell home:", e, flush=True)
+
+
 def build_messages(cfg, turn):
     me = turn["you"]
     others = ", ".join(
@@ -102,6 +144,9 @@ def build_messages(cfg, turn):
         msgs = []
     else:
         persona = (cfg.get("persona") or f"You are {me}.").strip()   # lives in YOUR file, at home
+        life = home_context(cfg)
+        if life:
+            persona += "\n\n" + life
         msgs = [{"role": "system", "content": f"{persona}\n\n{context}"}]
     for m in turn["messages"]:
         if m["kind"] == "agent" and m["author"] == me:
@@ -229,6 +274,8 @@ def main():
             http("POST", hub + "/api/agent/reply",
                  {"turn_id": turn["id"], "text": "" if passed else text, "pass": passed},
                  key=cfg["token"], timeout=30)
+            if not passed:
+                home_note(cfg, turn, text)
             what = {"plan": "planned", "work": "handed in", "review": "reviewed"}.get(turn.get("kind"), "said")
             print(f"[{time.strftime('%H:%M:%S')}] {'passed' if passed else what + ': ' + text[:80]!s}"
                   f"  ({time.time() - t0:.0f}s, {use['model']})", flush=True)
