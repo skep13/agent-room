@@ -1037,6 +1037,7 @@ function renderClear(){
   $("clearchat").textContent = host ? "Clear the chat" : (c.voted ? `You voted to clear (${c.votes} of ${c.needed})` : `Vote to clear the chat (${c.votes} of ${c.needed})`);
   $("clearchat").disabled = !host && !!c.voted;
   $("clearmode-wrap").hidden = !host; $("clearmode").checked = vote; $("dashlink").hidden = !host;
+  if (window.__TAURI_INTERNALS__) $("dashlink").removeAttribute("target");   // the desktop app can't open new windows
   $("clearhint").hidden = $("clearchat").hidden;
 }
 $("clearchat").onclick = async () => {
