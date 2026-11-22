@@ -39,11 +39,7 @@
       "minimumSystemVersion": "11.0"
     },
     "linux": {
-      "deb": {
-        "depends": [
-          "libayatana-appindicator3-1"
-        ]
-      },
+      "deb": {},
       "rpm": {
         "depends": [
           "libappindicator-gtk3"

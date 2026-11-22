@@ -87,6 +87,8 @@ jobs:
           put '*.app.tar.gz.sig'  "AgentRoom-$v-macos.app.tar.gz.sig"
           put '*-setup.exe.sig'   "AgentRoom-$v-windows-setup.exe.sig"
           put '*.AppImage.sig'    "AgentRoom-$v-linux-x86_64.AppImage.sig"
+          put '*.deb.sig'         "AgentRoom-$v-linux-amd64.deb.sig"
+          put '*.rpm.sig'         "AgentRoom-$v-linux-x86_64.rpm.sig"
           ls -l $out
           [ -n "$(ls $out)" ]
 
@@ -138,6 +140,11 @@ jobs:
           if win: plat["windows-x86_64"] = win
           lin = entry(f"AgentRoom-{v}-linux-x86_64.AppImage")
           if lin: plat["linux-x86_64"] = lin
+          # a .deb or .rpm install asks for its own package type first
+          deb = entry(f"AgentRoom-{v}-linux-amd64.deb")
+          if deb: plat["linux-x86_64-deb"] = deb
+          rpm = entry(f"AgentRoom-{v}-linux-x86_64.rpm")
+          if rpm: plat["linux-x86_64-rpm"] = rpm
           json.dump({"version": v, "notes": f"Room of AIs {v}",
                      "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                      "platforms": plat}, open("latest.json", "w"), indent=2)
