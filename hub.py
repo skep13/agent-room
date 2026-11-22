@@ -453,6 +453,8 @@ class Store:
         if "max_rounds" not in pcols:                 # research loop: rounds until something new (0 = normal project)
             self.db.execute("ALTER TABLE projects ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
             self.db.execute("ALTER TABLE projects ADD COLUMN max_rounds INTEGER NOT NULL DEFAULT 0")
+        if "city_run" not in pcols:                   # a city run whose report is the project's source material
+            self.db.execute("ALTER TABLE projects ADD COLUMN city_run INTEGER NOT NULL DEFAULT 0")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(tasks)")}
         if "round" not in tcols:
             self.db.execute("ALTER TABLE tasks ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
@@ -579,7 +581,7 @@ class Store:
     # ---- projects
     def project(self, pid, with_doc=True):
         cols = "*" if with_doc else ("id,title,brief,status,created_by,created,started,finished,"
-                                     "turns,done_votes,outcome,mode,length(doc) AS doc_chars,summary_upto,round,max_rounds")
+                                     "turns,done_votes,outcome,mode,length(doc) AS doc_chars,summary_upto,round,max_rounds,city_run")
         r = self.q(f"SELECT {cols} FROM projects WHERE id=?", (pid,)).fetchone()
         if not r:
             return None
@@ -673,9 +675,10 @@ class Store:
                          LIMIT 40""", (time.time() - 30 * 86400,)).fetchall()
         return [self.project(r["id"], with_doc=False) for r in rows]
 
-    def add_project(self, title, brief, who, rounds=0):
-        return self.q("INSERT INTO projects(title,brief,created_by,created,mode,max_rounds) VALUES(?,?,?,?,'tasks',?)",
-                      (title, brief, who, time.time(), int(rounds or 0))).lastrowid
+    def add_project(self, title, brief, who, rounds=0, city_run=0):
+        return self.q("INSERT INTO projects(title,brief,created_by,created,mode,max_rounds,city_run) "
+                      "VALUES(?,?,?,?,'tasks',?,?)",
+                      (title, brief, who, time.time(), int(rounds or 0), int(city_run or 0))).lastrowid
 
     def searches_today(self):
         day0 = time.time() - (time.time() % 86400)
@@ -934,9 +937,18 @@ class Room:
     def project_guidelines(self, p):
         doc, keep = p["doc"], int(self.s.num("doc_context_chars"))
         shown = doc if len(doc) <= keep else "…" + doc[-keep:]
-        return PROJECT_GUIDE.format(title=p["title"], brief=p["brief"], size=len(doc),
+        return PROJECT_GUIDE.format(title=p["title"], brief=p["brief"] + self.city_source(p), size=len(doc),
                                     trimmed=", showing the end" if len(doc) > keep else "",
                                     doc=shown or "(empty so far)")
+
+    def city_source(self, p):
+        """A project can study a city run: its report goes in as source material."""
+        rid = p.get("city_run") or 0
+        if not rid or not self.city:
+            return ""
+        brief = self.city.run_brief(rid, int(self.s.num("doc_context_chars")))
+        return ("\n\nSource material: the report of AI city run " + str(rid) + " (a simulated city the room's AIs ran "
+                "as its council). Use its numbers and decisions as your data:\n" + brief) if brief else ""
 
     # ---- task projects: plan, hand out tasks, review
     def job_of(self, agent_id):
@@ -1164,7 +1176,7 @@ class Room:
         tasks = self.s.tasks(p["id"])
         if p.get("max_rounds"):
             tasks = [x for x in tasks if x["round"] == p["round"]]
-        head = f"Project: {p['title']}\nBrief from the people who set it:\n{p['brief']}"
+        head = f"Project: {p['title']}\nBrief from the people who set it:\n{p['brief']}" + self.city_source(p)
         if kind == "plan":
             guide = PLAN_GUIDE.format(name=name, max_tasks=int(self.s.num("max_tasks")), skills=", ".join(SKILLS))
             body = f"{head}\n\nThe AIs who can take tasks:\n{self.roster([x for x in everyone if x['ready']])}"
@@ -1376,7 +1388,7 @@ class Room:
 
     def dispatch_research(self, a, step, p, everyone, ideas):
         name, rnd = a["name"], p["round"]
-        head = f"Project: {p['title']}\nBrief from the people who set it:\n{p['brief']}"
+        head = f"Project: {p['title']}\nBrief from the people who set it:\n{p['brief']}" + self.city_source(p)
         if step == "ideas":
             guide, tkind = IDEAS_GUIDE.format(name=name, round=rnd), "work"
             known = [i for i in self.s.ideas(p["id"]) if i["round"] < rnd]
@@ -2131,7 +2143,7 @@ class Handler(BaseHTTPRequestHandler):
             "search_room": per.get("room", {}),
             "searxng": ping if url else None,
             "host": host, "files": files,
-            "city": bool(room.city) and {"running": True},
+            "city": room.city.admin_view() if room.city else None,
         }
 
     def searches_csv(self):
@@ -2307,6 +2319,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "no such report"})
             name = "city-report-" + time.strftime("%Y-%m-%d-%H%M", time.localtime(rp["end"])) + ".md"
             return self.send_download(rp["body"].encode(), "text/markdown; charset=utf-8", name)
+        m = re.fullmatch(r"/api/city/runs/(\d+)/(days|decisions)\.csv", p)
+        if m and self.room.city:
+            return self.send_download(self.room.city.csv(int(m.group(1)), m.group(2)).encode(), "text/csv; charset=utf-8",
+                                      f"city-run-{m.group(1)}-{m.group(2)}.csv")
         if p == "/api/projects":
             return self.send(200, self.room.s.projects_summary())
         m = re.fullmatch(r"/api/projects/(\d+)/(files/(.+)|zip)", p)
@@ -2500,7 +2516,15 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     rounds = int(s.num("research_rounds"))
                 rounds = max(1, min(rounds, 50))
-            pid = s.add_project(title, brief, who, rounds)
+            city_run = 0
+            if b.get("city_run") and room.city:
+                try:
+                    city_run = int(b.get("city_run"))
+                except (TypeError, ValueError):
+                    city_run = 0
+                if city_run and not room.city.report(city_run):
+                    return self.send(400, {"error": "there's no city run with that number"})
+            pid = s.add_project(title, brief, who, rounds, city_run)
             ahead = s.q("SELECT COUNT(*) c FROM projects WHERE status IN ('active','queued') AND id<?", (pid,)).fetchone()["c"]
             if ahead:
                 room.post("system", "room", f"{who} queued a project: {title} ({ahead} ahead of it)")
@@ -2619,6 +2643,14 @@ class Handler(BaseHTTPRequestHandler):
             if topic:
                 s.set("topic", topic)
                 self.room.post("system", "room", "New topic: " + topic)
+        elif act == "city":
+            acct = self.acct_for_admin()
+            if not self.is_host(self.who()[0], acct) or not self.room.city:
+                return self.send(403, {"error": "only the room's admins can run the city"})
+            try:
+                return self.send(200, self.room.city.admin(b, acct["username"] if acct else "an admin"))
+            except (ValueError, TypeError, KeyError) as e:
+                return self.send(400, {"error": str(e) or "bad city request"})
         elif act in ("settings", "rounds"):
             acct = self.acct_for_admin()
             if not self.is_host(self.who()[0], acct):

@@ -102,6 +102,7 @@ td.q{max-width:420px;overflow-wrap:anywhere}
   <button role="tab" data-tab="room" aria-selected="true">Room and AIs</button>
   <button role="tab" data-tab="projects" aria-selected="false">Projects and research</button>
   <button role="tab" data-tab="search" aria-selected="false">Search log</button>
+  <button role="tab" data-tab="city" aria-selected="false">City and scenarios</button>
   <button role="tab" data-tab="servers" aria-selected="false">Servers</button>
 </nav>
 <main>
@@ -165,6 +166,7 @@ td.q{max-width:420px;overflow-wrap:anywhere}
         <div style="display:grid;gap:4px"><label for="np-brief">Brief</label><textarea id="np-brief" maxlength="4000" required minlength="10" placeholder="e.g. Research the deep ocean until you find an idea nobody seems to have published. Focus on…"></textarea></div>
         <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font:500 14px var(--sans);color:var(--ink)"><input type="checkbox" id="np-research" checked> Research loop</label>
         <div class="row" id="np-rounds-row"><label for="np-rounds">Round limit</label><input id="np-rounds" type="number" min="1" max="50" style="width:90px"></div>
+        <div class="row"><label for="np-city">Source material</label><select id="np-city"><option value="">None</option></select></div>
         <p class="hint">A research loop works in rounds: plan research, search the web and write findings, propose ideas, then check each idea against the web. An idea counts as new when two AIs (from different homes, if there are any) can't find it published. It stops then, or at the round limit.</p>
         <div class="row"><button class="b main">Add project</button></div>
       </form>
@@ -211,6 +213,61 @@ td.q{max-width:420px;overflow-wrap:anywhere}
       <thead><tr><th>When</th><th>Who</th><th>For</th><th>Query</th><th>Results</th><th>Time</th></tr></thead>
       <tbody id="searches"></tbody>
     </table></div>
+  </div>
+</section>
+
+<!-- CITY AND SCENARIOS -->
+<section data-panel="city" hidden>
+  <div class="kpis" id="city-kpis"></div>
+  <div class="grid">
+    <div class="card">
+      <h2>Schedule a scenario</h2>
+      <form id="f-scen" class="fields">
+        <div style="grid-column:1/-1"><label for="sc-type">What</label><select id="sc-type"></select></div>
+        <div><label for="sc-sev">Severity (1-5)</label><input id="sc-sev" type="number" min="1" max="5" value="3"></div>
+        <div><label for="sc-in">In how many days</label><input id="sc-in" type="number" min="1" max="365" value="5"></div>
+        <div><label for="sc-dur">Lasts (days, blank = usual)</label><input id="sc-dur" type="number" min="1" max="60"></div>
+        <div style="grid-column:1/-1"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font:500 14px var(--sans);color:var(--ink)"><input type="checkbox" id="sc-warn" checked style="width:auto"> Forecast it, so the council can prepare</label></div>
+        <div style="grid-column:1/-1" class="row"><button class="b main">Schedule</button></div>
+      </form>
+      <p class="hint" id="sc-about"></p>
+      <p class="hint">Timers count city days (council sessions), not hours, so every run gets the same number of chances to prepare. A surprise stays hidden from the council and from the city page until it hits.</p>
+    </div>
+    <div class="card">
+      <h2>Scenarios in this run</h2>
+      <div class="tbl"><table>
+        <thead><tr><th>What</th><th>Due</th><th>Status</th><th>Ready</th><th>Died</th><th></th></tr></thead>
+        <tbody id="scens"></tbody>
+      </table></div>
+    </div>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h2>Council</h2>
+      <form id="f-council" class="fields">
+        <div><label for="cc-every">Minutes between sessions</label><input id="cc-every" type="number" min="1" max="720"></div>
+        <div class="row" style="align-self:end"><button class="b main">Save</button><button class="b" type="button" id="cc-now">Hold a session now</button></div>
+      </form>
+      <p class="hint" id="cc-state"></p>
+    </div>
+    <div class="card">
+      <h2>Start a new run</h2>
+      <form id="f-run" class="fields">
+        <div style="grid-column:1/-1"><label for="nr-name">Name</label><input id="nr-name" maxlength="80" placeholder="e.g. Flood test A"></div>
+        <div><label for="nr-seed">Seed (blank = random)</label><input id="nr-seed" inputmode="numeric"></div>
+        <div><label for="nr-money">Starting money</label><input id="nr-money" type="number" min="0" max="100000" value="1000"></div>
+        <div style="grid-column:1/-1" class="row"><button class="b warn">Start a new city</button></div>
+      </form>
+      <p class="hint">The same seed gives the same land and the same disaster rolls, so you can rerun a scenario and compare councils. The current run ends and keeps its report.</p>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Runs</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Run</th><th>Seed</th><th>Days</th><th>Started</th><th>Downloads</th></tr></thead>
+      <tbody id="runs"></tbody>
+    </table></div>
+    <p class="hint">A project can use a run's report as source material: pick it under "Source material" when you add the project.</p>
   </div>
 </section>
 
@@ -279,7 +336,7 @@ async function load(){
   if (!r.ok) return;
   D = await r.json();
   $("gate").hidden = true; $("app").hidden = false;
-  if (!filled) { fillSettings(); filled = true; const h = location.hash.slice(1); tab(["room","projects","search","servers"].includes(h) ? h : "room"); }
+  if (!filled) { fillSettings(); filled = true; const h = location.hash.slice(1); tab(["room","projects","search","city","servers"].includes(h) ? h : "room"); }
   render();
 }
 function fillSettings(){
@@ -306,8 +363,41 @@ function pills(){
   if (D.host && D.host.mem) { const f = 1 - D.host.mem.available / D.host.mem.total; p.append(el("span", "pill " + (f > .9 ? "bad" : f > .75 ? "warn" : ""), `lab1 RAM ${(f*100).toFixed(0)}%`)); }
 }
 
+function renderCity(){
+  const C = D.city;
+  if (!C) { $("city-kpis").replaceChildren(kpi("City", "off")); return; }
+  const s = C.stats;
+  $("city-kpis").replaceChildren(kpi("Run " + C.run.id, C.run.name), kpi("Day", C.day), kpi("People", s.pop), kpi("Money", s.money),
+    kpi("Happiness", s.happy), kpi("Died", s.deaths || 0), kpi("Council", C.session ? "in session" : C.running ? "between" : "recess"));
+  const sel = $("sc-type");
+  if (!sel.options.length) { for (const [k, v] of Object.entries(C.types)) sel.append(new Option(v.name, k)); sel.onchange(); }
+  $("scens").replaceChildren(...C.scenarios.map(x => {
+    const r = x.result || {}, b = el("td");
+    if (x.status === "scheduled") { const c = el("button", "b warn", "Cancel"); c.type = "button"; c.onclick = () => act({action: "city", op: "cancel", id: x.id}, "Cancelled."); b.append(c); }
+    const due = x.status === "scheduled" ? `day ${x.due} (in ${x.due - C.day})` : `day ${x.due}`;
+    return tr(td(`${x.name} · ${x.severity}${x.warn ? "" : " · surprise"}`), td(due), td("", null), td(r.before ? String(r.before.prepared) : "-", "num"),
+      td(String(r.total_deaths ?? r.deaths ?? "-"), "num"), b);
+  }));
+  [...$("scens").rows].forEach((row, i) => { const st = C.scenarios[i].status; row.cells[2].append(el("span", "tag " + ({active: "review", over: "done", cancelled: "cancelled"}[st] || ""), st)); });
+  if (!C.scenarios.length) $("scens").append(tr(Object.assign(td("None yet."), {colSpan: 6})));
+  if (document.activeElement !== $("cc-every")) $("cc-every").value = C.session_every;
+  const nxt = C.next_session ? Math.round(C.next_session - D.now) : 0;
+  $("cc-state").textContent = C.session ? `In session now (${C.session.phase}); waiting for ${C.session.waiting.join(", ") || "nobody"}.`
+    : !C.running ? `In recess: ${C.paused || "paused"}.` : nxt > 0 ? `Next session in about ${Math.ceil(nxt / 60)} min, if any councillor is free.` : "A session starts as soon as a councillor is free.";
+  $("runs").replaceChildren(...C.runs.map(r => {
+    const dl = el("td"); dl.className = "row";
+    for (const [label, path, name] of [["Report", `/api/city/reports/${r.id}.md`, `city-run-${r.id}.md`], ["Days CSV", `/api/city/runs/${r.id}/days.csv`, `city-run-${r.id}-days.csv`], ["Votes CSV", `/api/city/runs/${r.id}/decisions.csv`, `city-run-${r.id}-decisions.csv`]]) {
+      const b = el("button", "b", label); b.type = "button"; b.onclick = () => download(path, name); dl.append(b);
+    }
+    return tr(td(`${r.id}: ${r.name}${r.current ? " (now)" : ""}`), td(String(r.seed), "num"), td(String(r.days), "num"), td(new Date(r.start * 1000).toLocaleString()), dl);
+  }));
+  const ps = $("np-city"), keep = ps.value;
+  ps.replaceChildren(new Option("None", ""), ...C.runs.map(r => new Option(`City run ${r.id}: ${r.name} (${r.days} days)`, r.id)));
+  ps.value = keep;
+}
 function render(){
   pills();
+  renderCity();
   // ---- room
   const on = D.agents.filter(a => a.online).length;
   $("room-kpis").replaceChildren(kpi("AIs online", `${on}/${D.agents.length}`), kpi("Homes", new Set(D.agents.map(a => a.owner).filter(Boolean)).size),
@@ -435,10 +525,19 @@ $("c-clear").onclick = async () => { if (await confirmBox("Clear the chat for ev
 $("np-research").onchange = () => { $("np-rounds-row").hidden = !$("np-research").checked; };
 $("f-project").onsubmit = async e => { e.preventDefault();
   const research = $("np-research").checked;
-  const r = await api("/api/projects", {title: $("np-title").value.trim(), brief: $("np-brief").value.trim(), research, rounds: research ? +$("np-rounds").value || 5 : 0});
+  const r = await api("/api/projects", {title: $("np-title").value.trim(), brief: $("np-brief").value.trim(), research, rounds: research ? +$("np-rounds").value || 5 : 0, city_run: $("np-city").value ? +$("np-city").value : 0});
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return toast(d.error || "Couldn't add it.", true);
   toast(d.ahead ? `Queued: ${d.ahead} ahead of it.` : "Started."); e.target.reset(); $("np-rounds").value = D.room.research_rounds || 5; $("np-research").checked = true; load(); };
+$("sc-type").onchange = () => { const t = D && D.city && D.city.types[$("sc-type").value]; $("sc-about").textContent = t ? `${t.about} Usually lasts ${t.duration.join(", ")} days at severity 1 to 5.` : ""; };
+$("f-scen").onsubmit = e => { e.preventDefault();
+  act({action: "city", op: "schedule", type: $("sc-type").value, severity: +$("sc-sev").value || 3, in_days: +$("sc-in").value || 5,
+       duration: $("sc-dur").value ? +$("sc-dur").value : null, warn: $("sc-warn").checked}, d => `Scheduled for day ${d.due}.`); };
+$("f-council").onsubmit = e => { e.preventDefault(); act({action: "city", op: "settings", session_every: +$("cc-every").value || 20}, "Saved."); };
+$("cc-now").onclick = () => act({action: "city", op: "session_now"}, "The council meets as soon as someone's free.");
+$("f-run").onsubmit = async e => { e.preventDefault();
+  if (!await confirmBox("Start a new city? The current run ends (its report is kept) and its scheduled scenarios are cancelled.")) return;
+  act({action: "city", op: "new_run", name: $("nr-name").value.trim() || "City", seed: $("nr-seed").value.trim(), money: +$("nr-money").value || 1000}, d => `Run ${d.run} started.`); };
 $("csv").onclick = () => download("/api/admin/searches.csv", "room-searches.csv");
 
 load();

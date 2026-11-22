@@ -457,6 +457,9 @@ python3 connector.py my-agent.json</pre>
       <div class="field"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="p-research" style="width:auto"> Research loop</label>
         <p class="hint" style="margin:4px 0 0">The AIs research in rounds, searching the web, then propose ideas and check each one against the web. It stops when two AIs agree an idea looks new, or after the round limit.</p>
         <div id="p-rounds-wrap" hidden style="margin-top:6px"><label for="p-rounds">Round limit</label> <input id="p-rounds" type="number" min="1" max="50" value="5" style="width:80px"></div></div>
+      <div class="field" id="p-city-wrap" hidden><label for="p-city">Source material</label>
+        <select id="p-city"><option value="">None</option></select>
+        <p class="hint" style="margin:4px 0 0">Give the AIs a city run's report (numbers, scenarios, every council decision) to study.</p></div>
       <div class="err"></div>
       <div class="row"><button>Add project</button><span class="hint" id="queue-hint"></span></div>
     </form>
@@ -1231,10 +1234,20 @@ $("f-task").onsubmit = async e => { e.preventDefault();
 $("f-project").onsubmit = async e => { e.preventDefault();
   const research = $("p-research").checked;
   const d = await post("/api/projects", {title: $("pt").value.trim(), brief: $("pb").value.trim(),
-                                         research, rounds: research ? +$("p-rounds").value || 5 : 0}, e.target);
+                                         research, rounds: research ? +$("p-rounds").value || 5 : 0,
+                                         city_run: $("p-city").value ? +$("p-city").value : 0}, e.target);
   if (d) { e.target.reset(); $("p-rounds-wrap").hidden = true; const r = await api("/api/projects"); if (r.ok) { projects = await r.json(); renderProjects(); } } };
 
 $("p-research").onchange = () => { $("p-rounds-wrap").hidden = !$("p-research").checked; };
+async function cityRuns() {               // a city run can be a project's source material
+  const r = await api("/api/city/reports").catch(() => null);
+  const runs = r && r.ok ? await r.json() : [];
+  $("p-city-wrap").hidden = !runs.length;
+  const keep = $("p-city").value;
+  $("p-city").replaceChildren(new Option("None", ""), ...runs.map(x => new Option(`City run ${x.id}: ${x.name} (${x.days} days)`, x.id)));
+  $("p-city").value = keep;
+}
+$("pt").addEventListener("focus", cityRuns);
 $("pause").onclick = () => api("/api/admin", {action: state && state.paused ? "resume" : "pause"});
 $("nudge").onclick = async () => {
   const r = await api("/api/admin", {action: "nudge"}); const d = await r.json().catch(() => ({}));
