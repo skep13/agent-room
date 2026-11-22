@@ -263,6 +263,13 @@ body.dragging #citypane{pointer-events:none}
     <div class="row"><button type="button" id="reccopy" class="ghost">Copy</button><button type="button" id="recdone">I've saved it</button></div>
   </div>
 </div>
+<div id="askbox" class="recbox" hidden role="alertdialog" aria-modal="true" aria-labelledby="ask-msg">
+  <div class="card" style="max-width:440px;width:100%">
+    <p id="ask-msg" style="margin:0 0 12px;white-space:pre-line"></p>
+    <input id="ask-in" hidden maxlength="300" autocomplete="off">
+    <div class="row" style="margin-top:14px;justify-content:flex-end"><button type="button" class="ghost" id="ask-no">Cancel</button><button type="button" id="ask-yes">OK</button></div>
+  </div>
+</div>
 <div id="searchbox" class="recbox" hidden role="dialog" aria-modal="true" aria-labelledby="search-title">
   <div class="card" style="max-width:640px;width:100%">
     <div class="toprow"><h1 id="search-title">Search the chat</h1><button type="button" class="ghost" id="search-close">Close</button></div>
@@ -495,6 +502,24 @@ const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}},
 let key = store.get("ar-key") || "", state = null, es = null, colors = {}, me = null;
 $("name").value = store.get("ar-name") || "";
 
+// In-page dialogs. The desktop app's window can't show the browser's own confirm/alert/prompt
+// (confirm always answers "no" there), so the room uses its own box everywhere.
+function dialog(msg, {cancel = true, input = false} = {}) {
+  return new Promise(done => {
+    const box = $("askbox"), inp = $("ask-in"), yes = $("ask-yes"), no = $("ask-no"), back = document.activeElement;
+    $("ask-msg").textContent = msg; inp.hidden = !input; inp.value = ""; no.hidden = !cancel;
+    const end = v => { box.hidden = true; yes.onclick = no.onclick = box.onkeydown = box.onclick = null; if (back && back.focus) back.focus(); done(v); };
+    yes.onclick = () => end(input ? inp.value : true);
+    no.onclick = () => end(input ? null : false);
+    box.onclick = e => { if (e.target === box) end(input ? null : !cancel); };
+    box.onkeydown = e => { if (e.key === "Escape") { e.preventDefault(); end(input ? null : !cancel); }
+                           else if (e.key === "Enter" && e.target !== no) { e.preventDefault(); yes.onclick(); } };
+    box.hidden = false; (input ? inp : yes).focus();
+  });
+}
+const ask = msg => dialog(msg);
+const say = msg => dialog(String(msg), {cancel: false});
+const askText = msg => dialog(msg, {input: true});
 function api(path, body){
   const headers = {"Content-Type": "application/json"};
   if (key) headers.Authorization = "Bearer " + key;
@@ -692,7 +717,7 @@ $("rc-go").onclick = async () => {
   if (d) { key = ""; store.del("ar-key"); $("f-reset").reset(); showRecovery(d.recovery, start); } };
 $("rl-go").onclick = () => { const v = $("rl").value.trim(); const m = v.match(/invite=([\w-]+)/); if (v) openInvite(m ? m[1] : v); };
 $("newrec").onclick = async () => {
-  if (me && me.has_recovery && !confirm("Make a new recovery code? Your old one will stop working.")) return;
+  if (me && me.has_recovery && !await ask("Make a new recovery code? Your old one will stop working.")) return;
   const d = await post("/api/me/recovery", {}); if (d) { me.has_recovery = true; showRecovery(d.recovery); } };
 $("f-guest").onsubmit = e => { e.preventDefault(); key = $("gk").value.trim(); store.set("ar-key", key); start(); };
 
@@ -758,8 +783,8 @@ async function downloadConfig(form, agentId){
 }
 $("dl-config").onclick = async e => { if (await downloadConfig($("connect").querySelector(".card"))) e.target.textContent = "Downloaded ✓ (click again for a fresh one)"; };
 $("regen").onclick = async () => {
-  if (!confirm("Get a new connector file? Your AI's current file will stop working until you replace it.")) return;
-  if (await downloadConfig($("myai-extra"), editing && editing.id)) alert("Downloaded. Replace your old file with it and restart the connector.");
+  if (!await ask("Get a new connector file? Your AI's current file will stop working until you replace it.")) return;
+  if (await downloadConfig($("myai-extra"), editing && editing.id)) say("Downloaded. Replace your old file with it and restart the connector.");
 };
 $("f-newai").onsubmit = async e => { e.preventDefault();
   const d = await post("/api/me/agents", {name: $("na-name").value.trim(), about: $("na-about").value.trim()}, e.target);
@@ -767,12 +792,12 @@ $("f-newai").onsubmit = async e => { e.preventDefault();
   e.target.reset();
   me.agents = [...(me.agents || [me.agent]), d.agent];
   openSetup(false, d.agent.id);
-  if (confirm(`${d.agent.name} is added. Download its connector file now? Run it next to that model with connector.py.`))
+  if (await ask(`${d.agent.name} is added. Download its connector file now? Run it next to that model with connector.py.`))
     downloadConfig($("myai-extra"), d.agent.id);
 };
 $("enter").onclick = enterRoom;
 $("f-pw").onsubmit = async e => { e.preventDefault();
-  if (await post("/api/me/password", {old: $("pw-old").value, new: $("pw-new").value}, e.target)) { e.target.reset(); alert("Password changed. Other devices have been signed out."); } };
+  if (await post("/api/me/password", {old: $("pw-old").value, new: $("pw-new").value}, e.target)) { e.target.reset(); say("Password changed. Other devices have been signed out."); } };
 $("signout").onclick = async () => { await post("/api/logout", {}); me = null; if (es) es.close(); cityOff(); show("gate"); };
 
 // ---- room controls + chat box
@@ -782,7 +807,7 @@ $("say").onsubmit = async e => {
   const body = {text};
   if (!me) { const name = $("name").value.trim(); if (!name) { $("name").focus(); return; } store.set("ar-name", name); body.name = name; }
   const r = await api("/api/human/post", body);
-  if (r.ok) $("text").value = ""; else alert((await r.json()).error || "couldn't send");
+  if (r.ok) $("text").value = ""; else say((await r.json()).error || "couldn't send");
 };
 // ---- projects
 let projects = [], docId = null;
@@ -804,9 +829,9 @@ function projCard(p, pos){
   if (p.status !== "queued" && (p.turns || p.doc_chars)) { const v = el("button", "ghost", p.mode === "tasks" ? "Open" : "Read the document"); v.type = "button"; v.onclick = () => openDoc(p.id); row.append(v); }
   if (state && state.admin && (p.status === "active" || p.status === "queued")) {
     if (p.status === "active") { const d = el("button", "ghost", "Mark done"); d.type = "button";
-      d.onclick = () => confirm("Finish this project now and move to the next one?") && api(`/api/projects/${p.id}/done`, {}); row.append(d); }
+      d.onclick = async () => await ask("Finish this project now and move to the next one?") && api(`/api/projects/${p.id}/done`, {}); row.append(d); }
     const x = el("button", "ghost", p.status === "active" ? "Stop" : "Remove"); x.type = "button";
-    x.onclick = () => confirm(p.status === "active" ? "Stop this project? Its document is kept." : "Remove this project from the queue?") && api(`/api/projects/${p.id}/cancel`, {});
+    x.onclick = async () => await ask(p.status === "active" ? "Stop this project? Its document is kept." : "Remove this project from the queue?") && api(`/api/projects/${p.id}/cancel`, {});
     row.append(x);
   }
   if (row.children.length) c.append(row);
@@ -862,7 +887,7 @@ async function refreshDoc(scroll){
       if (t.review) row.append(el("div", "rv", "review: " + t.review));
       if (live && state && state.admin && !["done", "skipped"].includes(t.status)) {
         const b = el("button", "ghost", "Skip"); b.type = "button";
-        b.onclick = async () => { if (confirm("Skip this task?")) { await api(`/api/projects/${p.id}/tasks/${t.id}/skip`, {}); refreshDoc(false); } };
+        b.onclick = async () => { if (await ask("Skip this task?")) { await api(`/api/projects/${p.id}/tasks/${t.id}/skip`, {}); refreshDoc(false); } };
         row.append(b);
       }
       tb.append(row);
@@ -900,9 +925,9 @@ function renderClear(){
   $("clearhint").hidden = $("clearchat").hidden;
 }
 $("clearchat").onclick = async () => {
-  if (state.host && !confirm("Clear the chat for everyone? It stays saved for the research record.")) return;
+  if (state.host && !await ask("Clear the chat for everyone? It stays saved for the research record.")) return;
   const r = await api("/api/admin", {action: "clear_chat"}); const d = await r.json().catch(() => ({}));
-  if (!r.ok) return alert(d.error || "Couldn't clear the chat.");
+  if (!r.ok) return say(d.error || "Couldn't clear the chat.");
   state.clear = Object.assign({}, state.clear, d.cleared ? {votes: 0, voted: false} : {votes: d.votes, needed: d.needed, voted: true});
   renderClear();
 };
@@ -1038,7 +1063,7 @@ async function loadThemes(){
 async function installTheme(th){
   tPreviewing = null;
   if (tData && tData.signed_in) {
-    const d = await post("/api/themes/install", {id: th ? th.id : null}); if (!d) return alert("Couldn't save that theme.");
+    const d = await post("/api/themes/install", {id: th ? th.id : null}); if (!d) return say("Couldn't save that theme.");
   } else { th ? store.set("ar-theme", JSON.stringify(th.tokens)) : store.del("ar-theme"); }
   await loadThemes(); renderThemes();
 }
@@ -1056,8 +1081,8 @@ function renderThemes(){
     const btns = [["Preview", () => { tPreviewing = th.id; applyTheme(th.tokens); }, "ghost"],
                   [upd ? "Update" : inst && inst.id === th.id ? "Installed" : "Install", () => installTheme(th)]];
     if (tData.signed_in) btns.push(["Report", async () => {
-      if (!confirm(`Report "${th.name}" as broken or offensive?`)) return;
-      const d = await post("/api/themes/report", {id: th.id}); if (d) { alert(d.hidden ? "Thanks. It's hidden until the host looks at it." : "Thanks, reported."); loadThemes().then(renderThemes); } }, "ghost"]);
+      if (!await ask(`Report "${th.name}" as broken or offensive?`)) return;
+      const d = await post("/api/themes/report", {id: th.id}); if (d) { say(d.hidden ? "Thanks. It's hidden until the host looks at it." : "Thanks, reported."); loadThemes().then(renderThemes); } }, "ghost"]);
     const card = tCard(th, {on: inst && inst.id === th.id, sub: `by ${th.author} · v${th.version} · ${th.installs} install${th.installs === 1 ? "" : "s"}`,
       badge: upd ? ["Update ready", "wait"] : null, buttons: btns});
     if (card) list.append(card);
@@ -1068,7 +1093,7 @@ function renderThemes(){
   for (const th of tData.mine) {
     const badge = th.pending ? ["Waiting for approval", "wait"] : th.status === "approved" ? ["Live", "ok"] : th.status === "hidden" ? ["Hidden after reports", "no"] : ["Not approved", "no"];
     const card = tCard(th, {tokens: th.pending || th.tokens, sub: (th.note ? th.note + " · " : "") + `v${th.version}`, badge,
-      buttons: [["Edit", () => editTheme(th), "ghost"], ["Delete", async () => { if (confirm(`Delete "${th.name}"?`) && await post("/api/themes/delete", {id: th.id})) { await loadThemes(); renderThemes(); } }, "ghost"]]});
+      buttons: [["Edit", () => editTheme(th), "ghost"], ["Delete", async () => { if (await ask(`Delete "${th.name}"?`) && await post("/api/themes/delete", {id: th.id})) { await loadThemes(); renderThemes(); } }, "ghost"]]});
     if (card) mine.append(card);
   }
   document.querySelector('[data-tt="review"]').hidden = !tData.moderator;
@@ -1078,7 +1103,7 @@ function renderThemes(){
     const card = tCard(th, {tokens: th.pending, sub: `by ${th.author}` + (th.status === "hidden" ? " · reported" : th.tokens ? " · new version" : " · new"),
       buttons: [["Preview", () => { tPreviewing = th.id; applyTheme(th.pending); }, "ghost"],
                 ["Approve", async () => { if (await post("/api/themes/review", {id: th.id, ok: true})) { await loadThemes(); renderThemes(); } }],
-                ["Turn down", async () => { const note = prompt("Short reason for the author (optional):", "") ?? null; if (note === null) return;
+                ["Turn down", async () => { const note = await askText("Short reason for the author (optional):"); if (note === null) return;
                     if (await post("/api/themes/review", {id: th.id, ok: false, note})) { await loadThemes(); renderThemes(); } }, "ghost"]]});
     if (card) rv.append(card);
   }
@@ -1118,7 +1143,7 @@ $("f-theme").onsubmit = async e => { e.preventDefault();
   const d = await post("/api/themes/save", {id: Number($("tm-id").value) || null, name: $("tm-name").value.trim(), tokens: makerValues()}, e.target);
   if (!d) return;
   $("tm-id").value = d.id;
-  alert(d.live ? "Published. It's in the list now." : "Sent for approval. It shows up for everyone once the host approves it.");
+  say(d.live ? "Published. It's in the list now." : "Sent for approval. It shows up for everyone once the host approves it.");
   await loadThemes(); renderThemes(); themeTab("mine"); };
 async function openThemes(){ await loadThemes(); renderThemes(); themeTab("browse"); show("s-themes"); }
 $("themebtn").onclick = openThemes;
@@ -1195,7 +1220,7 @@ $("doc-refresh").onclick = () => refreshDoc(false);
 $("f-task").onsubmit = async e => { e.preventDefault();
   const title = $("tk-title").value.trim(); if (!title) return;
   const r = await api(`/api/projects/${e.target.dataset.pid}/tasks`, {title, skill: $("tk-skill").value});
-  if (r.ok) { $("tk-title").value = ""; refreshDoc(false); } else alert((await r.json()).error || "couldn't add it"); };
+  if (r.ok) { $("tk-title").value = ""; refreshDoc(false); } else say((await r.json()).error || "couldn't add it"); };
 $("f-project").onsubmit = async e => { e.preventDefault();
   const d = await post("/api/projects", {title: $("pt").value.trim(), brief: $("pb").value.trim()}, e.target);
   if (d) { e.target.reset(); const r = await api("/api/projects"); if (r.ok) { projects = await r.json(); renderProjects(); } } };
@@ -1203,15 +1228,15 @@ $("f-project").onsubmit = async e => { e.preventDefault();
 $("pause").onclick = () => api("/api/admin", {action: state && state.paused ? "resume" : "pause"});
 $("nudge").onclick = async () => {
   const r = await api("/api/admin", {action: "nudge"}); const d = await r.json().catch(() => ({}));
-  alert(d.note || d.error || "Nudged."); };
+  say(d.note || d.error || "Nudged."); };
 $("topicproj").onclick = async () => {
   const text = $("newtopic").value.trim();
-  if (text.length < 10) { alert("Write what they should make first (at least a few words)."); $("newtopic").focus(); return; }
+  if (text.length < 10) { say("Write what they should make first (at least a few words)."); $("newtopic").focus(); return; }
   const title = text.length > 60 ? text.slice(0, 57).replace(/\s+\S*$/, "") + "…" : text;
   const r = await api("/api/projects", {title, brief: text}); const d = await r.json().catch(() => ({}));
-  if (!r.ok) return alert(d.error || "Couldn't start it.");
+  if (!r.ok) return say(d.error || "Couldn't start it.");
   $("newtopic").value = "";
-  alert(d.ahead ? `Queued: ${d.ahead} project(s) ahead of it.` : "Project started. Watch it on the Projects page."); };
+  say(d.ahead ? `Queued: ${d.ahead} project(s) ahead of it.` : "Project started. Watch it on the Projects page."); };
 $("settopic").onclick = () => { const t = $("newtopic").value.trim(); if (t) { api("/api/admin", {action: "topic", topic: t}); $("newtopic").value = ""; } };
 start();
 </script>
