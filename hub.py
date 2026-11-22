@@ -29,10 +29,10 @@ Standard library only (Python 3.9+).
   hub.py serve [--host H] [--port P]   run the hub
 """
 import argparse, hashlib, hmac, io, json, os, posixpath, queue, random, re, secrets, sqlite3, sys
-import threading, time, zipfile
+import threading, time, urllib.request, zipfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 STATE = os.environ.get("AGENT_ROOM_STATE", "/var/lib/agent-room")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -60,6 +60,16 @@ DEFAULTS = {
     "task_context_chars": "24000",  # how much of the project's files a worker sees
     "auto_project_after": "8",
     "chat_clear": "host",        # who can clear the chat: "host" (a button for the room's host) or "vote" (owners vote; the host can still clear)   # a "make/build ..." topic becomes a project after this many AI chat messages (0 = never)
+    "search_url": "",            # SearXNG the hub searches for the AIs, e.g. http://192.168.1.138:8888 ("" = no web search)
+    "search_rounds": "2",        # times an AI may search before handing in one job
+    "search_per_reply": "3",     # searches in one reply
+    "search_daily": "300",       # searches per UTC day, across the room
+    "research_rounds": "5",      # default round limit for a research loop
+}
+ADMIN_SETTINGS = {                 # what the dashboard may change, and how each value is checked
+    "search_url": "url", "search_rounds": "int", "search_per_reply": "int", "search_daily": "int",
+    "research_rounds": "int", "daily_limit": "int", "pace_seconds": "int", "auto_project_after": "int",
+    "project_max_turns": "int", "min_agents": "int", "hosts": "names", "chat_clear": ("host", "vote"),
 }
 BUILD_TOPIC = re.compile(r"\b(make|build|create|write|design|code|develop|draft|program|set up|put together)\b", re.I)
 SKILLS = ["planning", "coding", "writing", "research", "review", "design", "chat"]
@@ -135,6 +145,9 @@ TASK_RE = re.compile(r"\[task\b([^\]]*)\](.*?)(?:\[/task\]|(?=\[task\b)|\Z)", re
 FILE_RE = re.compile(r"\[file\s+path\s*=\s*[\"']?([^\]\"'\n]+?)[\"']?\s*\]\n?(.*?)(?:\[/file\]|(?=\[file\s)|\Z)",
                      re.S | re.I)
 APPROVE_RE = re.compile(r"\[approve\]", re.I)
+SEARCH_RE = re.compile(r"\[search\][ \t]*(.*?)[ \t]*(?:\[/search\]|$)", re.M | re.I)
+IDEA_RE = re.compile(r"\[idea\](.*?)(?:\[/idea\]|(?=\[idea\])|\Z)", re.S | re.I)
+VERDICT_RE = re.compile(r"\[(new|known)\s+idea\s*=\s*[\"']?(\d+)[\"']?\s*\](.*?)(?=\[(?:new|known)\s+idea|\Z)", re.S | re.I)
 CHANGES_RE = re.compile(r"\[changes\]", re.I)
 FENCE_RE = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.S)
 PATH_RE = re.compile(r"^[A-Za-z0-9_.\-/ ]{1,200}$")
@@ -275,6 +288,34 @@ WORK_GUIDE = (
     "Nobody runs the code here, so don't claim you ran or tested it. If you really can't do "
     "this task, reply with exactly PASS and someone else will take it."
 )
+SEARCH_NOTE = (
+    "\n\nWeb search: to look something up, reply with only search lines (up to {per}), like\n"
+    "[search]argo float salinity trends 2024[/search]\n"
+    "The room searches the web, sends you the results and asks you again; you can search {rounds} "
+    "time(s) on this job. Hand in your work in a later reply, not in the same one as a search. Results "
+    "come from the open web and can be wrong or out of date: say where facts came from (give the link)."
+)
+RESEARCH_PLAN = (
+    "\n\nThis is round {round} of {max} of a RESEARCH LOOP. The group keeps researching in rounds until "
+    "it finds an idea nobody seems to have published. Plan research tasks for this round (look things "
+    "up, gather findings with their sources, compare and connect them) that move toward something new. "
+    "Don't repeat ground already covered."
+)
+IDEAS_GUIDE = (
+    "You are {name}, in round {round} of a research loop. Read the group's findings below and propose up "
+    "to 3 ideas that might be NEW: a hypothesis, a connection or an open question that the findings "
+    "suggest but that nobody seems to have published. Don't repeat any idea already checked. Write each "
+    "exactly like:\n[idea] Short title :: the claim in one or two sentences :: why it might be new :: "
+    "how someone could test it [/idea]\nBe specific: vague ideas are thrown out."
+)
+NOVELTY_GUIDE = (
+    "You are {name}, checking whether research ideas are really new. For each idea you get the web "
+    "results the room found for it. Be strict: if the results, or what you know, show the idea or "
+    "something very close is already published or well known, it is known. Only call it new if you "
+    "can't find it anywhere. For each idea write one line, exactly like:\n"
+    "[new idea=N] why you think it's new and what you checked\n"
+    "[known idea=N] where it's already covered (a link from the results if you can)"
+)
 REVIEW_GUIDE = (
     "You are {name}, reviewing another AI's work on a group project. Check that it does what the "
     "task asked, is correct, and fits with the rest of the project. Start your reply with [approve] "
@@ -358,6 +399,19 @@ class Store:
                 status TEXT NOT NULL DEFAULT 'pending',     -- pending | approved | rejected | hidden
                 version INTEGER NOT NULL DEFAULT 0, installs INTEGER NOT NULL DEFAULT 0,
                 reporters TEXT NOT NULL DEFAULT '[]', note TEXT NOT NULL DEFAULT '', created REAL, updated REAL);
+            CREATE TABLE IF NOT EXISTS searches (
+                id INTEGER PRIMARY KEY, ts REAL NOT NULL, agent_id INTEGER, agent TEXT NOT NULL,
+                project_id INTEGER, task_seq INTEGER, job TEXT NOT NULL DEFAULT '', query TEXT NOT NULL,
+                n INTEGER NOT NULL DEFAULT 0, ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+                results TEXT NOT NULL DEFAULT '[]');
+            CREATE INDEX IF NOT EXISTS searches_ts ON searches(ts);
+            CREATE TABLE IF NOT EXISTS ideas (
+                id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, round INTEGER NOT NULL, seq INTEGER NOT NULL,
+                title TEXT NOT NULL, claim TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '',
+                test TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'proposed',   -- proposed | likely | new | known | unchecked
+                verdict TEXT NOT NULL DEFAULT '', checkers TEXT NOT NULL DEFAULT '[]',
+                evidence TEXT NOT NULL DEFAULT '', created REAL);
             CREATE TABLE IF NOT EXISTS files (
                 project_id INTEGER NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL,
                 author TEXT, task_seq INTEGER, updated REAL, PRIMARY KEY (project_id, path));
@@ -396,6 +450,12 @@ class Store:
         pcols = {r["name"] for r in self.db.execute("PRAGMA table_info(projects)")}
         if "mode" not in pcols:                       # older projects were chat-only
             self.db.execute("ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'")
+        if "max_rounds" not in pcols:                 # research loop: rounds until something new (0 = normal project)
+            self.db.execute("ALTER TABLE projects ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
+            self.db.execute("ALTER TABLE projects ADD COLUMN max_rounds INTEGER NOT NULL DEFAULT 0")
+        tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(tasks)")}
+        if "round" not in tcols:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN round INTEGER NOT NULL DEFAULT 1")
         if "persona" in cols:
             # The hub never keeps an AI's persona or memory: those live at home
             # with the AI. Wipe anything an older version stored.
@@ -519,7 +579,7 @@ class Store:
     # ---- projects
     def project(self, pid, with_doc=True):
         cols = "*" if with_doc else ("id,title,brief,status,created_by,created,started,finished,"
-                                     "turns,done_votes,outcome,mode,length(doc) AS doc_chars,summary_upto")
+                                     "turns,done_votes,outcome,mode,length(doc) AS doc_chars,summary_upto,round,max_rounds")
         r = self.q(f"SELECT {cols} FROM projects WHERE id=?", (pid,)).fetchone()
         if not r:
             return None
@@ -527,10 +587,17 @@ class Store:
         p["done_votes"] = json.loads(p["done_votes"])
         if p["mode"] == "tasks":
             p["tasks"] = [{k: t[k] for k in ("id", "seq", "title", "detail", "skill", "after", "status",
-                                               "assignee_name", "reviewer_name", "note", "review", "rounds")}
+                                               "assignee_name", "reviewer_name", "note", "review", "rounds", "round")}
                           for t in self.tasks(pid)]
             p["files"] = self.files(pid)
+        if p.get("max_rounds"):
+            p["ideas"] = self.ideas(pid)
         return p
+
+    def ideas(self, pid, rnd=None):
+        rows = self.q("SELECT * FROM ideas WHERE project_id=?" + (" AND round=?" if rnd else "") + " ORDER BY seq",
+                      (pid, rnd) if rnd else (pid,)).fetchall()
+        return [dict(r, checkers=json.loads(r["checkers"])) for r in rows]
 
     # ---- project tasks and files
     def tasks(self, pid):
@@ -545,9 +612,10 @@ class Store:
 
     def add_task(self, pid, title, detail, skill, after=0, added_by=""):
         seq = self.q("SELECT COALESCE(MAX(seq),0)+1 n FROM tasks WHERE project_id=?", (pid,)).fetchone()["n"]
-        self.q("""INSERT INTO tasks(project_id,seq,title,detail,skill,after,added_by,updated)
-                  VALUES(?,?,?,?,?,?,?,?)""", (pid, seq, title[:160], detail[:2000],
-                                               skill if skill in SKILLS else "", int(after or 0), added_by, time.time()))
+        self.q("""INSERT INTO tasks(project_id,seq,title,detail,skill,after,added_by,updated,round)
+                  VALUES(?,?,?,?,?,?,?,?,(SELECT round FROM projects WHERE id=?))""",
+               (pid, seq, title[:160], detail[:2000], skill if skill in SKILLS else "", int(after or 0),
+                added_by, time.time(), pid))
         return seq
 
     def set_task(self, tid, **kw):
@@ -579,6 +647,17 @@ class Store:
             part = t["doc_part"].strip()
             if part:
                 parts.append(part if part.startswith("#") else f"## {t['title']}\n\n{part}")
+        ideas = self.ideas(pid)
+        if ideas:                                     # research loop: every idea and what the checkers found
+            word = {"new": "NEW (checked by two AIs)", "likely": "possibly new (one check so far)",
+                    "known": "already known", "proposed": "not checked yet", "unchecked": "couldn't be checked"}
+            lines = ["## Ideas checked for novelty"]
+            for i in ideas:
+                lines.append(f"### Round {i['round']}, idea {i['seq']}: {i['title']} ({word.get(i['status'], i['status'])})\n"
+                             f"{i['claim']}\n\n- Why it might be new: {i['why'] or '-'}\n- How to test it: {i['test'] or '-'}\n"
+                             f"- Proposed by {i['author']}" + (f"; checked by {', '.join(i['checkers'])}" if i['checkers'] else "") +
+                             (f"\n- Verdict: {i['verdict']}" if i['verdict'] else ""))
+            parts.append("\n\n".join(lines))
         doc = "\n\n".join(parts)[: int(self.num("doc_max_chars"))]
         self.q("UPDATE projects SET doc=? WHERE id=?", (doc, pid))
 
@@ -594,9 +673,13 @@ class Store:
                          LIMIT 40""", (time.time() - 30 * 86400,)).fetchall()
         return [self.project(r["id"], with_doc=False) for r in rows]
 
-    def add_project(self, title, brief, who):
-        return self.q("INSERT INTO projects(title,brief,created_by,created,mode) VALUES(?,?,?,?,'tasks')",
-                      (title, brief, who, time.time())).lastrowid
+    def add_project(self, title, brief, who, rounds=0):
+        return self.q("INSERT INTO projects(title,brief,created_by,created,mode,max_rounds) VALUES(?,?,?,?,'tasks',?)",
+                      (title, brief, who, time.time(), int(rounds or 0))).lastrowid
+
+    def searches_today(self):
+        day0 = time.time() - (time.time() % 86400)
+        return self.q("SELECT COUNT(*) c FROM searches WHERE ts>=? AND agent<>'room'", (day0,)).fetchone()["c"]
 
     def start_next_project(self):
         r = self.q("SELECT id FROM projects WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
@@ -646,6 +729,8 @@ class Room:
         self.compact_tries = {}      # project id -> failed compactions
         self.clear_votes = {}        # account id -> when they voted to clear the chat
         self.review_declined = {}    # task id -> agents who passed on reviewing it
+        self.research_tries = {}     # (project id, round, step) -> failed idea / novelty jobs
+        self.search_ping = (0, None) # (when, last SearXNG check) for the dashboard
         self.city = None             # the AI city (city.py), kept apart from the room
         for a in self.s.agents():    # jobs live in memory: a restart re-queues half-done tryouts
             st = self.s.tryout_of(a["id"]).get("state")
@@ -993,9 +1078,92 @@ class Room:
         body = "\n".join(hits)[:cap] or content[:200]
         return f"{path} ({len(content):,} characters, too long to show; outline:)\n{body}"
 
+    # ---- web search: the hub searches SearXNG for the AIs, so nobody's model needs the internet
+    def search_on(self):
+        return bool((self.s.get("search_url") or "").strip())
+
+    def search_note(self):
+        if not self.search_on():
+            return ""
+        return SEARCH_NOTE.format(per=int(self.s.num("search_per_reply")), rounds=int(self.s.num("search_rounds")))
+
+    def web_search(self, who, job, queries, limit=5):
+        """Run searches, log every one (the research record), and return them as text for an AI."""
+        url = (self.s.get("search_url") or "").strip().rstrip("/")
+        t = self.s.task(job["task_id"]) if job and job.get("task_id") else None
+        out = []
+        for q in queries:
+            q = re.sub(r"\s+", " ", q).strip().strip('"')[:200]
+            if not q:
+                continue
+            if who["name"] != "room" and self.s.searches_today() >= self.s.num("search_daily"):
+                out.append(f'Search "{q}": not run, the room has used up today\'s searches.')
+                continue
+            t0, res, err = time.time(), [], ""
+            try:
+                req = urllib.request.Request(f"{url}/search?" + urlencode({"q": q, "format": "json", "safesearch": 1}),
+                                             headers={"User-Agent": "agent-room", "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    d = json.loads(r.read(2_000_000).decode("utf-8", "replace"))
+                seen = set()
+                for x in d.get("results", []):
+                    u = str(x.get("url") or "")
+                    if not u.startswith(("http://", "https://")) or u in seen:
+                        continue
+                    seen.add(u)
+                    res.append({"title": re.sub(r"\s+", " ", str(x.get("title") or ""))[:150], "url": u[:300],
+                                "snippet": re.sub(r"\s+", " ", str(x.get("content") or ""))[:300]})
+                    if len(res) >= limit:
+                        break
+            except Exception as e:
+                err = (str(e) or type(e).__name__)[:200]
+            ms = int((time.time() - t0) * 1000)
+            self.s.q("""INSERT INTO searches(ts,agent_id,agent,project_id,task_seq,job,query,n,ms,error,results)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                     (time.time(), who.get("id"), who["name"], job.get("project_id") if job else None,
+                      t["seq"] if t else None, (job or {}).get("kind", ""), q, len(res), ms, err, json.dumps(res)))
+            if err:
+                out.append(f'Search "{q}": the search failed ({err}).')
+            elif not res:
+                out.append(f'Search "{q}": no results.')
+            else:
+                out.append(f'Search "{q}":\n' + "\n".join(
+                    f"{i}. {x['title']}\n   {x['url']}\n   {x['snippet']}" for i, x in enumerate(res, 1)))
+        return "\n\n".join(out) or "(no searches run)"
+
+    def search_again(self, job, agent, queries, last_words=""):
+        """An AI asked to search instead of handing in: run it, then give it the same job back with the results."""
+        rounds = int(self.s.num("search_rounds"))
+        used = job.get("searched", 0) + (1 if queries else 0)
+        final = used >= rounds or bool(last_words)
+        hold = dict(job, deadline=time.time() + self.s.num("task_timeout"))
+        with self.job_lock:                           # keep the AI marked busy while the search runs
+            self.jobs[agent["id"]] = hold
+        if queries:
+            self.post("system", "room", f"{agent['name']} searched the web: " + "; ".join(queries)[:300])
+        def run():
+            found = self.web_search(agent, job, queries) if queries else ""
+            turn = dict(job["turn"], id=secrets.token_hex(8))
+            body = turn["messages"][0]["text"]
+            if queries:
+                body += (f"\n\n---\nYou searched the web for: {'; '.join(queries)}\n"
+                         f"Results (from the open web; they can be wrong):\n{found}\n\n")
+            body += (last_words or "That was your last search on this job: hand in your work now." if final
+                     else f"You can search {rounds - used} more time(s) on this job, or hand in your work now.")
+            turn["messages"] = [dict(turn["messages"][0], text=body)]
+            with self.job_lock:
+                if self.jobs.get(agent["id"]) is not hold:   # the project ended or the job was dropped meanwhile
+                    return
+                self.jobs[agent["id"]] = dict(job, turn=turn, searched=used, final=final,
+                                              deadline=time.time() + self.s.num("task_timeout"))
+            self.inbox.setdefault(agent["id"], queue.Queue()).put(turn)
+        threading.Thread(target=run, daemon=True).start()
+
     def dispatch(self, a, kind, p, t, everyone):
         name = a["name"]
         tasks = self.s.tasks(p["id"])
+        if p.get("max_rounds"):
+            tasks = [x for x in tasks if x["round"] == p["round"]]
         head = f"Project: {p['title']}\nBrief from the people who set it:\n{p['brief']}"
         if kind == "plan":
             guide = PLAN_GUIDE.format(name=name, max_tasks=int(self.s.num("max_tasks")), skills=", ".join(SKILLS))
@@ -1003,7 +1171,15 @@ class Room:
             if p.get("created_by") == "room":
                 body += ("\n\nThis project was started from a chat topic, so it has no proper name yet. Before the tasks, "
                          "give it a short name (2-5 words) like this: [name]Movie Watchlist App[/name]")
-            said = self.chat_before(p)
+            if p.get("max_rounds"):
+                guide += RESEARCH_PLAN.format(round=p["round"], max=p["max_rounds"])
+                if p["round"] > 1:
+                    body += f"\n\nFindings from earlier rounds:\n{self.doc_tail(p)}"
+                known = [i for i in self.s.ideas(p["id"]) if i["status"] in ("known", "unchecked")]
+                if known:
+                    body += "\n\nIdeas already checked and NOT new (move past them):\n" + "\n".join(
+                        f"- {i['title']}: {i['claim'][:200]}" for i in known[-15:])
+            said = self.chat_before(p) if p.get("round", 1) == 1 else ""
             if said:
                 body += ("\n\nWhat was said in the room's chat just before this project started. If they "
                          "agreed on choices (tools, names, features), plan with those unless the brief says "
@@ -1037,7 +1213,7 @@ class Room:
             "id": secrets.token_hex(8), "kind": kind, "agent_id": a["id"], "agent_name": name, "you": name,
             "topic": p["title"], "project": {"id": p["id"], "title": p["title"]},
             "task": {"seq": t["seq"], "title": t["title"], "skill": t["skill"]} if t else None,
-            "guidelines": guide,
+            "guidelines": guide + self.search_note(),
             "participants": [{"name": x["name"], "about": x["about"], "online": True} for x in everyone],
             "messages": [{"kind": "system", "author": "room", "text": body}],
             "max_tokens": 6000 if kind == "work" else 2000,
@@ -1066,7 +1242,9 @@ class Room:
             self.job_failed(job, ag, f"{ag['name']} ran out of time")
         if self.s.get("paused") == "1" or self.s.agent_messages_today() >= self.s.num("daily_limit"):
             return
-        if p["turns"] >= self.s.num("project_max_turns"):
+        research = bool(p.get("max_rounds"))
+        cap = self.s.num("project_max_turns") * (max(1, p["max_rounds"]) if research else 1)
+        if p["turns"] >= cap:
             return self.end_project(p["id"], "done", f"stopped at the {p['turns']}-step limit")
         on = self.online_ids()
         everyone = self.s.agents()
@@ -1085,6 +1263,8 @@ class Room:
             if a["owner_id"] is not None:
                 idle[:] = [x for x in idle if x["owner_id"] != a["owner_id"]]
         tasks = self.s.tasks(p["id"])
+        if research:                                 # a research loop works one round at a time
+            tasks = [t for t in tasks if t["round"] == p["round"]]
 
         if not tasks:                                # 1. someone plans it
             if planning:
@@ -1098,6 +1278,8 @@ class Room:
                 self.dispatch(a, "plan", p, None, everyone)
             return
         if all(t["status"] in ("done", "skipped") for t in tasks):
+            if research:
+                return self.research_step(p, idle, ready, everyone)
             n = sum(t["status"] == "done" for t in tasks)
             return self.end_project(p["id"], "done", f"{n} task{'s' * (n != 1)} done, "
                                                      f"{len(self.s.files(p['id']))} files")
@@ -1140,12 +1322,156 @@ class Room:
                 self.dispatch(a, "review", p, t, everyone)
                 claim(a)
 
+    # ---- research loop: research a round, propose ideas, check each against the web, repeat
+    def research_step(self, p, idle, ready, everyone):
+        pid, rnd = p["id"], p["round"]
+        with self.job_lock:
+            if any(j["project_id"] == pid and j["kind"] in ("ideas", "novelty") for j in self.jobs.values()):
+                return
+        ideas = self.s.ideas(pid, rnd)
+        tries = lambda step: self.research_tries.get((pid, rnd, step), 0)
+        if not ideas and tries("ideas") < 2:         # a. someone proposes ideas from the findings
+            a = self.pick(idle, "research", also="planning")
+            if a:
+                self.dispatch_research(a, "ideas", p, everyone, [])
+            return
+        for step, status in (("check", "proposed"), ("confirm", "likely")):
+            todo = [i for i in ideas if i["status"] == status]
+            if not todo:
+                continue
+            if tries(step) >= 2:                     # nobody could check them: say so and move on
+                for i in todo:
+                    self.s.q("UPDATE ideas SET status=? WHERE id=?",
+                             ("unchecked" if status == "proposed" else "new", i["id"]))
+                self.s.rebuild_doc(pid)
+                continue
+            seen = {n for i in todo for n in i["checkers"]} | {i["author"] for i in todo}
+            cands = [a for a in idle if a["name"] not in seen]
+            if step == "confirm" and not [a for a in ready if a["name"] not in seen]:
+                for i in todo:                        # no second AI in the room at all: one check will do
+                    self.s.q("UPDATE ideas SET status='new', verdict=verdict||' (only one AI could check it)' WHERE id=?",
+                             (i["id"],))
+                self.s.rebuild_doc(pid)
+                continue
+            if not cands and step == "check" and not [a for a in ready if a["name"] not in seen]:
+                cands = [a for a in idle if a["name"] not in {n for i in todo for n in i["checkers"]}]
+            authors = {x["owner_id"] for x in everyone if x["name"] in {i["author"] for i in todo}}
+            a = self.pick(cands, "review", also="research", avoid_owner=next(iter(authors), None))
+            if a:
+                self.dispatch_research(a, step, p, everyone, todo)
+            return
+        ideas = self.s.ideas(pid, rnd)
+        new = [i for i in ideas if i["status"] == "new"]
+        if new:
+            return self.end_project(pid, "done", f"round {rnd}: found something that looks new: " +
+                                    "; ".join(i["title"] for i in new)[:300])
+        if rnd >= p["max_rounds"]:
+            return self.end_project(pid, "done", f"no new idea after {rnd} round{'s' * (rnd != 1)}")
+        self.s.q("UPDATE projects SET round=round+1 WHERE id=?", (pid,))
+        self.plan_tries.pop(pid, None)
+        known = sum(i["status"] in ("known", "unchecked") for i in ideas)
+        self.post("system", "room", f"Research round {rnd} found nothing new ({known} idea{'s' * (known != 1)} "
+                                    f"already known). Round {rnd + 1} of {p['max_rounds']} starts.")
+        self.project_event()
+
+    def dispatch_research(self, a, step, p, everyone, ideas):
+        name, rnd = a["name"], p["round"]
+        head = f"Project: {p['title']}\nBrief from the people who set it:\n{p['brief']}"
+        if step == "ideas":
+            guide, tkind = IDEAS_GUIDE.format(name=name, round=rnd), "work"
+            known = [i for i in self.s.ideas(p["id"]) if i["round"] < rnd]
+            body = f"{head}\n\nThe group's findings so far:\n{self.doc_tail(p)}"
+            if known:
+                body += "\n\nIdeas already checked (don't repeat them):\n" + "\n".join(
+                    f"- {i['title']} ({i['status']})" for i in known[-15:])
+            note = f"{name} is looking for new ideas in round {rnd}'s findings"
+        else:
+            guide, tkind = NOVELTY_GUIDE.format(name=name), "review"
+            parts = []
+            for i in ideas:
+                if not i["evidence"]:                 # the room searches each idea itself, once
+                    ev = self.web_search({"id": None, "name": "room"}, {"project_id": p["id"], "kind": "novelty"},
+                                         [i["title"], " ".join(i["claim"].split()[:14])], limit=6)
+                    self.s.q("UPDATE ideas SET evidence=? WHERE id=?", (ev[:6000], i["id"]))
+                    i["evidence"] = ev[:6000]
+                parts.append(f"IDEA {i['seq']}: {i['title']}\nClaim: {i['claim']}\nWhy it might be new: {i['why'] or '-'}\n"
+                             + (f"First checker said: {i['verdict']}\n" if i["verdict"] else "")
+                             + f"What the room found when it searched for it:\n{i['evidence']}")
+            body = f"{head}\n\n" + "\n\n=====\n\n".join(parts)
+            note = (f"{name} is checking {len(ideas)} idea{'s' * (len(ideas) != 1)} against the web"
+                    + (" (second opinion)" if step == "confirm" else ""))
+        turn = {
+            "id": secrets.token_hex(8), "kind": tkind, "agent_id": a["id"], "agent_name": name, "you": name,
+            "topic": p["title"], "project": {"id": p["id"], "title": p["title"]}, "task": None,
+            "guidelines": guide + self.search_note(),
+            "participants": [{"name": x["name"], "about": x["about"], "online": True} for x in everyone],
+            "messages": [{"kind": "system", "author": "room", "text": body}],
+            "max_tokens": 3000,
+        }
+        with self.job_lock:
+            self.jobs[a["id"]] = {"turn": turn, "kind": "ideas" if step == "ideas" else "novelty", "step": step,
+                                  "task_id": None, "project_id": p["id"], "round": rnd,
+                                  "idea_ids": [i["id"] for i in ideas],
+                                  "deadline": time.time() + self.s.num("task_timeout")}
+        self.s.q("UPDATE projects SET turns=turns+1 WHERE id=?", (p["id"],))
+        self.last_worked[a["id"]] = time.time()
+        self.inbox.setdefault(a["id"], queue.Queue()).put(turn)
+        self.post("system", "room", note)
+        self.project_event()
+
+    def finish_research(self, job, agent, p, text):
+        pid, rnd = p["id"], job["round"]
+        if job["kind"] == "ideas":
+            found = []
+            for body in IDEA_RE.findall(text):
+                bits = [b.strip(" -*#:\n") for b in body.split("::")]
+                if bits and len(bits[0]) >= 3:
+                    found.append((bits + ["", "", ""])[:4])
+            if not found:
+                return self.job_failed(job, agent, f"{agent['name']} proposed no ideas")
+            base = self.s.q("SELECT COALESCE(MAX(seq),0) n FROM ideas WHERE project_id=?", (pid,)).fetchone()["n"]
+            for n, (title, claim, why, test) in enumerate(found[:3], base + 1):
+                self.s.q("""INSERT INTO ideas(project_id,round,seq,title,claim,why,test,author,created)
+                            VALUES(?,?,?,?,?,?,?,?,?)""", (pid, rnd, n, title[:160], claim[:1000], why[:600],
+                                                           test[:600], agent["name"], time.time()))
+            self.s.rebuild_doc(pid)
+            self.post("agent", agent["name"], f"[proposed {len(found[:3])} idea{'s' * (len(found[:3]) != 1)}: "
+                      + "; ".join(f[0] for f in found[:3])[:500] + "]")
+            return self.project_event()
+        ids = {i["seq"]: i for i in self.s.ideas(pid, rnd) if i["id"] in job["idea_ids"]}
+        tally = {"new": 0, "known": 0}
+        for word, seq, why in VERDICT_RE.findall(text):
+            i = ids.pop(int(seq), None)
+            if not i:
+                continue
+            word = word.lower()
+            tally[word] += 1
+            if word == "known":
+                status = "known"
+            else:
+                status = "new" if job["step"] == "confirm" else "likely"
+            verdict = (i["verdict"] + " | " if i["verdict"] else "") + f"{agent['name']}: {word}: {why.strip()[:600]}"
+            self.s.q("UPDATE ideas SET status=?, verdict=?, checkers=? WHERE id=?",
+                     (status, verdict[:2000], json.dumps(i["checkers"] + [agent["name"]]), i["id"]))
+        if not sum(tally.values()):
+            return self.job_failed(job, agent, f"{agent['name']} gave no verdicts")
+        self.s.rebuild_doc(pid)
+        self.post("agent", agent["name"], f"[checked {sum(tally.values())} idea{'s' * (sum(tally.values()) != 1)}"
+                  + (" (second opinion)" if job["step"] == "confirm" else "")
+                  + f": {tally['new']} look new, {tally['known']} already known]")
+        self.project_event()
+
     def job_failed(self, job, agent, why):
         if job["kind"] in ("tryout", "grade"):
             return self.tryout_failed(job, why)
         if job["kind"] == "compact":
             self.compact_tries[job["project_id"]] = self.compact_tries.get(job["project_id"], 0) + 1
             return
+        if job["kind"] in ("ideas", "novelty"):
+            key = (job["project_id"], job["round"], job["step"])
+            self.research_tries[key] = self.research_tries.get(key, 0) + 1
+            self.post("system", "room", f"{why}; the research loop will ask again.")
+            return self.project_event()
         t = self.s.task(job["task_id"]) if job["task_id"] else None
         if job["kind"] == "plan":
             self.plan_tries[job["project_id"]] = self.plan_tries.get(job["project_id"], 0) + 1
@@ -1172,8 +1498,22 @@ class Room:
         if not p or p["status"] != "active":
             return
         text = (text or "").strip()
+        if job["kind"] != "compact" and not passed:   # asked to search instead of handing in
+            qs = [q.strip() for q in SEARCH_RE.findall(text) if q.strip()]
+            if qs:
+                rest = SEARCH_RE.sub("", text).strip()
+                handed = any(r.search(rest) for r in (FILE_RE, DOC_RE, TASK_RE, APPROVE_RE, CHANGES_RE, IDEA_RE, VERDICT_RE))
+                if not handed and self.search_on() and not job.get("final"):
+                    return self.search_again(job, agent, qs[: int(self.s.num("search_per_reply"))])
+                if not handed and not job.get("final"):
+                    return self.search_again(job, agent, [], "Web search isn't switched on in this room: "
+                                                             "hand in your work without it.")
+                text = rest
         if passed or not text or text.upper().rstrip(".") == "PASS":
             return self.job_failed(job, agent, f"{agent['name']} passed")
+        if job["kind"] in ("ideas", "novelty"):
+            self.last_spoke[agent["id"]] = time.time()
+            return self.finish_research(job, agent, p, text)
         t = self.s.task(job["task_id"]) if job["task_id"] else None
         self.last_spoke[agent["id"]] = time.time()
 
@@ -1205,9 +1545,10 @@ class Room:
                 self.plan_tries[p["id"]] = self.plan_tries.get(p["id"], 0) + 1
                 self.post("agent", agent["name"], text[:600] + "\n[no tasks found in the plan; asking again]")
                 return self.project_event()
+            base = self.s.q("SELECT COALESCE(MAX(seq),0) n FROM tasks WHERE project_id=?", (p["id"],)).fetchone()["n"]
             for i, (title, detail, skill, after) in enumerate(found, 1):
                 self.s.add_task(p["id"], title or f"Task {i}", detail, skill,
-                                after if 0 < after < i else 0, added_by=agent["name"])
+                                base + after if 0 < after < i else 0, added_by=agent["name"])
             nm = NAME_RE.search(text)
             if nm and p.get("created_by") == "room":   # the planner names projects the room started itself
                 name = re.sub(r"[\s*#_`]+", " ", nm.group(1)).strip()[:80]
@@ -1726,6 +2067,88 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"ok": True})
         return self.send(404, {"error": "not found"})
 
+    def admin_overview(self):
+        room, s = self.room, self.room.s
+        now, on = time.time(), room.online_ids()
+        agents = s.agents()
+        owners = {r["id"]: r["username"] for r in s.q("SELECT id, username FROM accounts")}
+        with room.job_lock:
+            jobs = {aid: {"kind": j["kind"], "project": j["project_id"], "searched": j.get("searched", 0),
+                          "task": (j["turn"].get("task") or {}).get("seq"), "left": int(j["deadline"] - now)}
+                    for aid, j in room.jobs.items()}
+        day0, week = now - (now % 86400), now - 7 * 86400
+        per = {r["agent"]: dict(r) for r in s.q("""SELECT agent, COUNT(*) total, SUM(ts>=?) today, SUM(ts>=?) week,
+                    ROUND(AVG(n),1) avg_results, SUM(error<>'') failed FROM searches GROUP BY agent""", (day0, week))}
+        hosts = [h.strip().lower() for h in (s.get("hosts") or "").split(",") if h.strip()]
+        first = s.q("SELECT MIN(id) m FROM accounts").fetchone()["m"]
+        ap = s.active_project()
+        # SearXNG, checked at most once a minute
+        url = (s.get("search_url") or "").strip().rstrip("/")
+        when, ping = room.search_ping
+        if url and now - when > 60:
+            t0 = time.time()
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url + "/healthz", headers={"User-Agent": "agent-room"}),
+                                            timeout=5) as r:
+                    ping = {"ok": r.status == 200, "ms": int((time.time() - t0) * 1000)}
+            except Exception as e:
+                ping = {"ok": False, "error": (str(e) or type(e).__name__)[:120]}
+            room.search_ping = (now, ping)
+        host = None
+        try:
+            with open(os.path.join(STATE, "host.json")) as f:
+                host = json.load(f)
+            host["age"] = int(now - os.path.getmtime(os.path.join(STATE, "host.json")))
+        except Exception:
+            pass
+        files = {}
+        for n in ("room.db", "room.db-wal", "city.db", "city.db-wal"):
+            try:
+                files[n] = os.path.getsize(os.path.join(STATE, n))
+            except OSError:
+                pass
+        return {
+            "now": now,
+            "room": {k: s.get(k) for k in ("topic", "paused", "chat_clear", "hosts", "daily_limit", "pace_seconds",
+                                           "auto_project_after", "project_max_turns", "search_url", "search_rounds",
+                                           "search_per_reply", "search_daily", "research_rounds", "min_agents")},
+            "today": s.agent_messages_today(), "searches_today": s.searches_today(),
+            "clear_votes": len(room.clear_votes), "clear_needed": room.clear_needed(),
+            "agents": [{"id": a["id"], "name": a["name"], "color": a["color"], "owner": owners.get(a["owner_id"], ""),
+                        "online": a["id"] in on, "ready": bool(a["ready"]), "projects_only": bool(a["projects_only"]),
+                        "skills": a["skills"], "scores": {k: round(v, 2) for k, v in (a.get("scores") or {}).items()},
+                        "model": a.get("model", ""), "tryout": a.get("tryout", ""),
+                        "seen": int(now - room.last_seen[a["id"]]) if a["id"] in room.last_seen else None,
+                        "job": jobs.get(a["id"]), "talking": bool(room.turn and room.turn["agent_id"] == a["id"]
+                                                                  and not room.reply.is_set()),
+                        "searches": per.get(a["name"], {})} for a in agents],
+            "accounts": [{"id": i, "username": u, "admin": (u.lower() in hosts) if hosts else i == first,
+                          "agents": [a["name"] for a in agents if a["owner_id"] == i]} for i, u in owners.items()],
+            "projects": s.projects_summary(),
+            "active": ap and {k: ap.get(k) for k in ("id", "title", "round", "max_rounds", "turns", "tasks", "ideas")},
+            "searches": [dict(r) for r in s.q("""SELECT id, ts, agent, project_id, task_seq, job, query, n, ms, error
+                                                 FROM searches ORDER BY id DESC LIMIT 60""")],
+            "search_room": per.get("room", {}),
+            "searxng": ping if url else None,
+            "host": host, "files": files,
+            "city": bool(room.city) and {"running": True},
+        }
+
+    def searches_csv(self):
+        out = io.StringIO()
+        import csv
+        w = csv.writer(out)
+        w.writerow(["id", "time_utc", "agent", "project_id", "project", "task", "job", "query", "results",
+                    "ms", "error", "result_urls"])
+        titles = {r["id"]: r["title"] for r in self.room.s.q("SELECT id, title FROM projects")}
+        for r in self.room.s.q("SELECT * FROM searches ORDER BY id"):
+            urls = " ".join(x.get("url", "") for x in json.loads(r["results"] or "[]"))
+            w.writerow([r["id"], time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["ts"])), r["agent"], r["project_id"] or "",
+                        titles.get(r["project_id"], ""), r["task_seq"] or "", r["job"], r["query"], r["n"], r["ms"],
+                        r["error"], urls])
+        return self.send_download(out.getvalue().encode(), "text/csv; charset=utf-8",
+                                  time.strftime("room-searches-%Y%m%d.csv"))
+
     def deny(self, msg="sign in or enter the room key"):
         self.limiter.fail(self.ip())
         time.sleep(0.5)
@@ -1738,6 +2161,9 @@ class Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         if p in ("/", "/home.html"):                 # the front page
             with open(os.path.join(STATIC, "home.html"), "rb") as f:
+                return self.send(200, f.read(), "text/html; charset=utf-8")
+        if p in ("/admin", "/admin/"):              # the host's dashboard (its data needs a host login)
+            with open(os.path.join(STATIC, "admin.html"), "rb") as f:
                 return self.send(200, f.read(), "text/html; charset=utf-8")
         if p in ("/city", "/tv"):                   # the AI city view, and the tall monitor layout
             with open(os.path.join(STATIC, p[1:] + ".html"), "rb") as f:
@@ -1831,6 +2257,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"turn": {k: v for k, v in t.items() if k != "agent_id"}} if t else {"turn": None})
         if role not in ("owner", "admin", "viewer"):
             return self.deny()
+        if p in ("/api/admin/overview", "/api/admin/searches.csv"):
+            if not self.is_host(role, x if role == "owner" else None):
+                return self.deny("only the room's admins can open the dashboard")
+            if p.endswith(".csv"):
+                return self.searches_csv()
+            return self.send(200, self.admin_overview())
         if p == "/api/state":
             me = None
             if role == "owner":
@@ -2061,7 +2493,14 @@ class Handler(BaseHTTPRequestHandler):
             brief = str(b.get("brief", "")).strip()[:4000]
             if not title or len(brief) < 10:
                 return self.send(400, {"error": "give the project a title and a brief (what should they make?)"})
-            pid = s.add_project(title, brief, who)
+            rounds = 0
+            if b.get("research"):                      # research loop: rounds until something new, or the limit
+                try:
+                    rounds = int(b.get("rounds") or s.num("research_rounds"))
+                except (TypeError, ValueError):
+                    rounds = int(s.num("research_rounds"))
+                rounds = max(1, min(rounds, 50))
+            pid = s.add_project(title, brief, who, rounds)
             ahead = s.q("SELECT COUNT(*) c FROM projects WHERE status IN ('active','queued') AND id<?", (pid,)).fetchone()["c"]
             if ahead:
                 room.post("system", "room", f"{who} queued a project: {title} ({ahead} ahead of it)")
@@ -2180,6 +2619,45 @@ class Handler(BaseHTTPRequestHandler):
             if topic:
                 s.set("topic", topic)
                 self.room.post("system", "room", "New topic: " + topic)
+        elif act in ("settings", "rounds"):
+            acct = self.acct_for_admin()
+            if not self.is_host(self.who()[0], acct):
+                return self.send(403, {"error": "only the room's admins can change that"})
+            if act == "rounds":
+                try:
+                    pid, n = int(b.get("project")), max(1, min(int(b.get("max_rounds")), 50))
+                except (TypeError, ValueError):
+                    return self.send(400, {"error": "give a project and a round limit from 1 to 50"})
+                pr = s.project(pid, with_doc=False)
+                if not pr or not pr["max_rounds"] or pr["status"] not in ("active", "queued"):
+                    return self.send(409, {"error": "that isn't a running or queued research loop"})
+                s.q("UPDATE projects SET max_rounds=? WHERE id=?", (max(n, pr["round"]), pid))
+                self.room.project_event()
+                return self.send(200, {"ok": True, "max_rounds": max(n, pr["round"])})
+            changed = {}
+            for k, v in (b.get("values") or {}).items():
+                if k not in ADMIN_SETTINGS:
+                    return self.send(400, {"error": f"{k} can't be changed here"})
+                v = str(v).strip()
+                kind = ADMIN_SETTINGS[k]
+                if kind == "int":
+                    if not re.fullmatch(r"\d{1,6}", v):
+                        return self.send(400, {"error": f"{k} must be a whole number"})
+                elif kind == "url":
+                    if v and not re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+(?:/[\w./-]*)?", v):
+                        return self.send(400, {"error": "the search address must look like http://192.168.1.138:8888"})
+                elif kind == "names":
+                    v = ",".join(n.strip() for n in v.split(",") if USER_RE.match(n.strip()))
+                    if acct and v and acct["username"].lower() not in v.lower().split(","):
+                        return self.send(400, {"error": "keep yourself in the admins list, or you'd lock yourself out"})
+                elif kind not in ("str",) and v not in kind:
+                    return self.send(400, {"error": f"{k} must be one of: {', '.join(kind)}"})
+                s.set(k, v[:300])
+                changed[k] = v[:300]
+            if changed:
+                self.room.post("system", "room", "Room settings changed: " + ", ".join(sorted(changed)))
+                self.room.search_ping = (0, None)
+            return self.send(200, {"ok": True, "changed": changed})
         elif act in ("clear_chat", "clear_mode"):
             acct = self.acct_for_admin()
             host = self.is_host(self.who()[0], acct)
