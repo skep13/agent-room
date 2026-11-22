@@ -43,6 +43,7 @@ DEFAULTS = {
     "pace_seconds": "45",        # gap between AI messages
     "turn_timeout": "600",       # how long a home model gets to answer
     "hosts": "",                 # who can make reset links for others (comma-separated usernames; empty = the first account)
+    "hidden_agents": "",         # AIs left out of the pages' lists (comma-separated names); their logins still work
     "theme_mods": "",            # who approves themes (comma-separated usernames; empty = the first account)
     "idle_seconds": "1800",      # after everyone passes, wait this long
     "daily_limit": "400",        # AI messages per UTC day, across the room
@@ -504,6 +505,9 @@ class Store:
         r = self.q(f"SELECT {self.AGENT_COLS} WHERE a.id=?", (agent_id,)).fetchone()
         return self._agent(r) if r else None
 
+    def hidden_agents(self):
+        return {n.strip().lower() for n in (self.get("hidden_agents") or "").split(",") if n.strip()}
+
     def owned_agents(self, account_id):
         return [self._agent(r) for r in self.q(f"SELECT {self.AGENT_COLS} WHERE a.owner_id=? ORDER BY a.id",
                                                 (account_id,))]
@@ -795,11 +799,13 @@ class Room:
         on = self.online_ids()
         speaking = self.turn["agent_name"] if self.turn and not self.reply.is_set() else None
         agents = self.s.agents()
+        gone = self.s.hidden_agents()
         with self.job_lock:
             working = {self.s.agent(aid)["name"]: {"kind": j["kind"], "task": (j["turn"]["task"] or {}).get("seq")}
                        for aid, j in self.jobs.items() if self.s.agent(aid)}
         return {"topic": self.s.get("topic"), "paused": self.s.get("paused") == "1",
-                "agents": [{k: v for k, v in a.items() if k != "owner_id"} for a in agents],
+                "agents": [dict({k: v for k, v in a.items() if k != "owner_id"}, hidden=a["name"].lower() in gone)
+                           for a in agents],
                 "online": [a["name"] for a in agents if a["id"] in on],
                 "speaking": speaking, "working": working, "today": self.s.agent_messages_today(),
                 "daily_limit": int(self.s.num("daily_limit"))}
@@ -807,6 +813,7 @@ class Room:
     def public(self):
         on = self.online_ids()
         agents = self.s.agents()
+        gone = self.s.hidden_agents()
         ap = self.s.active_project()
         with self.job_lock:
             busy = {self.s.agent(aid)["name"]: j["kind"] for aid, j in self.jobs.items() if self.s.agent(aid)}
@@ -816,7 +823,7 @@ class Room:
         return {"agents": [{"name": a["name"], "color": a["color"], "online": a["id"] in on,
                             "skills": a["skills"][:3] if a.get("tryout") == "done" else [],
                             "doing": busy.get(a["name"]) or ("talking" if speaking == a["name"] else "")}
-                           for a in agents if a["ready"]],
+                           for a in agents if a["ready"] and a["name"].lower() not in gone],
                 "homes": len(homes), "project": ap["title"] if ap else None, "projects_done": done,
                 "paused": self.s.get("paused") == "1", "today": self.s.agent_messages_today()}
 
@@ -2083,6 +2090,7 @@ class Handler(BaseHTTPRequestHandler):
         room, s = self.room, self.room.s
         now, on = time.time(), room.online_ids()
         agents = s.agents()
+        gone = s.hidden_agents()
         owners = {r["id"]: r["username"] for r in s.q("SELECT id, username FROM accounts")}
         with room.job_lock:
             jobs = {aid: {"kind": j["kind"], "project": j["project_id"], "searched": j.get("searched", 0),
@@ -2133,7 +2141,7 @@ class Handler(BaseHTTPRequestHandler):
                         "seen": int(now - room.last_seen[a["id"]]) if a["id"] in room.last_seen else None,
                         "job": jobs.get(a["id"]), "talking": bool(room.turn and room.turn["agent_id"] == a["id"]
                                                                   and not room.reply.is_set()),
-                        "searches": per.get(a["name"], {})} for a in agents],
+                        "searches": per.get(a["name"], {})} for a in agents if a["name"].lower() not in gone],
             "accounts": [{"id": i, "username": u, "admin": (u.lower() in hosts) if hosts else i == first,
                           "agents": [a["name"] for a in agents if a["owner_id"] == i]} for i, u in owners.items()],
             "projects": s.projects_summary(),
@@ -2722,7 +2730,9 @@ class Handler(BaseHTTPRequestHandler):
             elif len(chat) >= s.num("min_agents"):
                 note = "Nudged: someone will speak in a moment."
             else:
-                offline = [a["name"] for a in ags if a["ready"] and a["id"] not in on]
+                gone = s.hidden_agents()
+                offline = [a["name"] for a in ags
+                           if a["ready"] and a["id"] not in on and a["name"].lower() not in gone]
                 note = (f"Only {', '.join(chat) or 'no AI'} can chat right now"
                         + (f" ({', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline)" if offline else "")
                         + ". Say something and it will answer you, or start a project to put everyone online to work.")

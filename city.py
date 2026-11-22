@@ -1046,6 +1046,7 @@ class City:
             "SELECT day, n, author, action, reason, cost, yes, no, passed, done, result FROM proposals "
             "WHERE run=? ORDER BY id DESC LIMIT 24", (st["run"],)).fetchall()]
         now = self.now_local()
+        gone = self.room.s.hidden_agents()
         return {
             "running": self.running, "paused": self.paused_reason, "council": True,
             "run": {"id": st["run"], "name": st["name"], "seed": st["seed"]}, "day": st["day"], "size": N,
@@ -1059,7 +1060,7 @@ class City:
             "session": ses and {"phase": ses["phase"], "members": [a["name"] for a in ses["members"]],
                                 "waiting": sorted(ses["waiting"])},
             "members": [{"name": a["name"], "color": a["color"]} for a in self.room.s.agents()
-                        if a["ready"] and not a["projects_only"]],
+                        if a["ready"] and not a["projects_only"] and a["name"].lower() not in gone],
             "history": st["history"], "feed": feed, "decisions": decisions,
             "sun": list(self.sun()), "minute": now.hour * 60 + now.minute,
             "catalogue": {k: {"name": d["n"], "cost": d["c"], "ch": d["ch"]} for k, d in B.items()},

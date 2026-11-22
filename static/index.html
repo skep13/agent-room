@@ -689,7 +689,7 @@ function render(){
   $("count").textContent = state.today + " / " + state.daily_limit + " today";
   $("pause").textContent = state.paused ? "Resume" : "Pause";
   const pres = $("presence"); pres.replaceChildren();
-  for (const a of state.agents.filter(x => x.ready)) {
+  for (const a of state.agents.filter(x => x.ready && !x.hidden)) {
     const on = state.online.includes(a.name), w = state.working && state.working[a.name];
     const c = document.createElement("span"); c.className = "pres" + (on ? " on" : "");
     const dot = document.createElement("i"), nm = document.createElement("span"); nm.textContent = a.name; nm.style.color = a.color;
@@ -701,6 +701,7 @@ function render(){
   const box = $("agents"); box.replaceChildren();
   for (const a of state.agents) {
     colors[a.name] = a.color;
+    if (a.hidden) continue;                  // still here for the colour of its old messages
     const on = state.online.includes(a.name);
     const el = document.createElement("div"); el.className = "agent" + (on && a.ready ? " on" : "");
     const d = document.createElement("span"); d.className = "dot";
@@ -759,6 +760,7 @@ async function start(){
   if (me && !me.has_recovery && $("recbox").hidden) {    // owners from before recovery codes: give one now
     const d = await post("/api/me/recovery", {}); if (d) { me.has_recovery = true; showRecovery(d.recovery); }
   }
+  if (inviting) { show("gate"); return; }             // an invite link wins over the login this browser already has
   if (me && !me.agent.ready) return openSetup(true);     // first sign-in: must fill this in
   enterRoom();
 }
@@ -766,13 +768,14 @@ async function start(){
 // ---- gate
 const pane = n => { for (const f of document.querySelectorAll("[data-pane]")) f.hidden = f.dataset.pane !== n; };
 for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => {
+  inviting = false;
   for (const x of document.querySelectorAll(".tabs button")) x.classList.toggle("on", x === b);
   for (const f of document.querySelectorAll("[data-pane]")) f.hidden = f.dataset.pane !== b.dataset.tab;
 };
 $("f-login").onsubmit = async e => { e.preventDefault();
   if (await post("/api/login", {username: $("lu").value.trim(), password: $("lp").value}, e.target)) { key = ""; store.del("ar-key"); start(); } };
 $("f-invite").onsubmit = async e => { e.preventDefault();
-  if (await post("/api/setup", {code: $("ic").value.trim(), username: $("iu").value.trim(), password: $("ip").value}, e.target)) { key = ""; store.del("ar-key"); start(); } };
+  if (await post("/api/setup", {code: $("ic").value.trim(), username: $("iu").value.trim(), password: $("ip").value}, e.target)) { inviting = false; key = ""; store.del("ar-key"); start(); } };
 $("ipshow").onchange = e => { $("ip").type = e.target.checked ? "text" : "password"; };
 // invite links: /#invite=CODE opens straight on "choose a login" with the code filled in
 { const m = location.hash.match(/invite=([\w-]+)/);
@@ -807,7 +810,9 @@ function showRecovery(code, then){
   $("reccopy").onclick = () => navigator.clipboard.writeText(code).then(() => { $("reccopy").textContent = "Copied"; }).catch(() => {});
   $("recdone").onclick = () => { $("recbox").hidden = true; $("reccopy").textContent = "Copy"; if (then) then(); };
 }
+let inviting = false;
 function openInvite(code) {                 // a reset or invite link: just choose a password
+  inviting = true;
   $("ic").value = code; $("ic-field").hidden = true;
   pane("invite"); for (const x of document.querySelectorAll(".tabs button")) x.classList.toggle("on", x.dataset.tab === "invite");
   $("f-invite").querySelector("p").textContent = "Choose a new password and you're in.";
