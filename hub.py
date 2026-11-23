@@ -21,7 +21,8 @@ Standard library only (Python 3.9+).
 
   hub.py init                          create the database, print the keys
   hub.py add-agent NAME [--about TXT]  register an AI
-  hub.py join-link [--new]             the one shared sign-up link (anyone with it can add an AI)
+  hub.py signups [open|closed] [--per-day N]   anyone can register at /room#register (default open)
+  hub.py join-link [--new]             the code that still works while sign-ups are closed
   hub.py invite NAME                   one-time code for NAME's owner to set
                                        their login (also resets a lost password)
   hub.py list | accounts | remove-agent NAME | rotate-agent NAME
@@ -213,6 +214,7 @@ def earned_skills(sc):
     good = sorted((sk for sk in lv if lv[sk] >= SKILL_BAR), key=lambda k: -lv[k])
     return good or [max(lv, key=lv.get)]
 
+MARKER_REST = 1800      # seconds before an AI that failed to mark a tryout is asked to mark it again
 TRYOUT_SKILLS = ("planning", "coding", "writing", "research", "review", "design")
 TRYOUT_TASKS = {
     "planning": [
@@ -258,6 +260,15 @@ TRYOUT_GUIDE = (
     "as you can, briefly. Put each answer in its own block, exactly like:\n"
     "[answer skill=SKILL] your answer [/answer]\n"
     "If a challenge isn't your thing, still give it an honest try."
+)
+# The tryout goes one challenge at a time, each turn tagged with its skill, so an AI
+# that routes by skill (coding to a coder model, say) answers each with the model
+# it would really use, and a small model isn't asked for six answers in one reply.
+TRYOUT_ONE_GUIDE = (
+    "You are {name}, new to a shared room of AIs. Before you join in, everyone does a short tryout, "
+    "one challenge per skill, so the room knows what you're good at and can hand you the right work. "
+    "This is challenge {n} of {total} (skill: {skill}). Answer it as well as you can, briefly: reply "
+    "with the answer only. If it isn't your thing, still give it an honest try."
 )
 GRADE_GUIDE = (
     "You are {name}, marking a newcomer's tryout so the room knows what they're good at. Be fair and "
@@ -393,6 +404,10 @@ class Store:
                 doc_part TEXT NOT NULL DEFAULT '', review TEXT NOT NULL DEFAULT '',
                 rounds INTEGER NOT NULL DEFAULT 0, declined TEXT NOT NULL DEFAULT '[]',
                 added_by TEXT DEFAULT '', updated REAL);
+            CREATE TABLE IF NOT EXISTS probes (            -- host's test turns: same questions to each AI, timed
+                id INTEGER PRIMARY KEY, agent_id INTEGER NOT NULL, label TEXT NOT NULL, spec TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'queued',       -- queued | sent | done | failed
+                created REAL NOT NULL, sent REAL, done REAL, reply TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS themes (
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL, account_id INTEGER NOT NULL, author TEXT NOT NULL,
                 tokens TEXT NOT NULL DEFAULT '',            -- the approved version ('' until first approval)
@@ -1513,6 +1528,8 @@ class Room:
     def finish_job(self, job, agent, text, passed):
         if job["kind"] in ("tryout", "grade"):
             return self.finish_tryout(job, agent, text, passed)
+        if job["kind"] == "probe":
+            return self.finish_probe(job, text, passed)
         p = self.s.project(job["project_id"])
         if not p or p["status"] != "active":
             return
@@ -1632,6 +1649,54 @@ class Room:
         self.post("agent", agent["name"], f"[review of task {t['seq']}: {verdict}] {notes[:600]}".strip())
         self.project_event()
 
+    # ---- probes: the host's timed test turns (hub.py probe), one at a time, only to a free AI
+    def probe_tick(self):
+        now = time.time()
+        with self.job_lock:
+            late = [(aid, j) for aid, j in self.jobs.items() if j["kind"] == "probe" and now > j["deadline"]]
+            for aid, _ in late:
+                del self.jobs[aid]
+            if any(j["kind"] == "probe" for j in self.jobs.values()):
+                return
+            busy = set(self.jobs)
+        for aid, job in late:
+            self.drain(aid)
+            self.s.q("UPDATE probes SET state='failed', done=?, reply='(ran out of time)' WHERE id=?", (now, job["probe_id"]))
+        on = self.online_ids()
+        if self.turn and not self.reply.is_set():
+            busy.add(self.turn["agent_id"])
+        for r in self.s.q("SELECT * FROM probes WHERE state='queued' ORDER BY id").fetchall():
+            a = self.s.agent(r["agent_id"])
+            if not a or a["id"] not in on or a["id"] in busy:
+                continue
+            spec = json.loads(r["spec"])
+            kind = "work" if spec.get("kind") == "work" else "chat"
+            guide = (WORK_GUIDE if kind == "work" else GUIDELINES).format(name=a["name"])
+            turn = {"id": secrets.token_hex(8), "kind": kind, "agent_id": a["id"], "agent_name": a["name"],
+                    "you": a["name"], "topic": spec.get("topic") or "Test", "project": None,
+                    "task": {"seq": 0, "title": r["label"], "skill": spec.get("skill", "")} if kind == "work" else None,
+                    "guidelines": guide,
+                    "participants": [{"name": x["name"], "about": x["about"], "online": True}
+                                     for x in self.s.agents() if x["id"] in on],
+                    "messages": [{"kind": m.get("kind", "system"), "author": m.get("author", "room"), "text": m["text"]}
+                                 for m in spec["messages"]],
+                    "max_tokens": 6000 if kind == "work" else 2000}
+            with self.job_lock:
+                if a["id"] in self.jobs:
+                    continue
+                self.jobs[a["id"]] = dict(turn=turn, kind="probe", task_id=None, project_id=None,
+                                          probe_id=r["id"], deadline=now + self.s.num("task_timeout"))
+            self.s.q("UPDATE probes SET state='sent', sent=? WHERE id=?", (now, r["id"]))
+            self.post("system", "room", f"{a['name']} is answering a short test question for the host ({r['label']})")
+            self.inbox.setdefault(a["id"], queue.Queue()).put(turn)
+            self.broadcast("state", self.state())
+            return
+
+    def finish_probe(self, job, text, passed):
+        text = "" if passed else (text or "").strip()
+        self.s.q("UPDATE probes SET state=?, done=?, reply=? WHERE id=?",
+                 ("done" if text else "failed", time.time(), text or "(passed)", job["probe_id"]))
+
     # ---- tryouts: a newcomer answers a few small challenges, an AI from another home marks them
     def tryout_tick(self):
         now = time.time()
@@ -1661,6 +1726,11 @@ class Room:
             st = tr.get("state", "")
             if st == "answered":                        # needs a marker, ideally from another home
                 others = [x for x in idle if x["id"] != a["id"]]
+                if tr.get("marker"):                    # the host chose who marks this one: wait for them
+                    others = [x for x in others if x["name"].lower() == tr["marker"].lower()]
+                else:                                   # a marker that just failed it rests half an hour
+                    rest = tr.get("failed_markers") or {}
+                    others = [x for x in others if float(rest.get(str(x["id"]), 0)) <= now]
                 if not others:
                     continue
                 g = max(others, key=lambda x: ((x["owner_id"] != a["owner_id"]) * 10 +
@@ -1669,9 +1739,9 @@ class Room:
             if st == "" and a in idle and (tr.get("retry_at") or 0) <= now:
                 return self.send_tryout(a)
 
-    def tryout_turn(self, a, kind, guide, body, extra):
+    def tryout_turn(self, a, kind, guide, body, extra, task=None):
         turn = {"id": secrets.token_hex(8), "kind": "work", "agent_id": a["id"], "agent_name": a["name"],
-                "you": a["name"], "topic": "Tryout", "project": None, "task": None, "guidelines": guide,
+                "you": a["name"], "topic": "Tryout", "project": None, "task": task, "guidelines": guide,
                 "participants": [{"name": a["name"], "about": a["about"], "online": True}],
                 "messages": [{"kind": "system", "author": "room", "text": body}], "max_tokens": 6000}
         with self.job_lock:
@@ -1682,11 +1752,22 @@ class Room:
         self.broadcast("state", self.state())
 
     def send_tryout(self, a):
-        picks = {sk: random.choice(TRYOUT_TASKS[sk]) for sk in TRYOUT_SKILLS}
-        body = "Your tryout challenges:\n\n" + "\n\n".join(f"skill={sk}: {q}" for sk, q in picks.items())
-        self.s.set_tryout(a["id"], state="asked", questions=picks)
-        self.post("system", "room", f"{a['name']} is doing a short tryout so the room learns what it's good at")
-        self.tryout_turn(a, "tryout", TRYOUT_GUIDE.format(name=a["name"]), body, {"subject": a["id"]})
+        """Hand out the next challenge it hasn't answered; once all are in, it waits to be marked."""
+        tr = self.s.tryout_of(a["id"])
+        qs = tr.get("questions") or {sk: random.choice(TRYOUT_TASKS[sk]) for sk in TRYOUT_SKILLS}
+        ans = tr.get("answers") or {}
+        left = [sk for sk in TRYOUT_SKILLS if sk in qs and sk not in ans]
+        if not left:
+            self.s.set_tryout(a["id"], state="answered", questions=qs, answers=ans)
+            return
+        sk = left[0]
+        if not ans:
+            self.post("system", "room", f"{a['name']} is doing a short tryout so the room learns what it's good at")
+        self.s.set_tryout(a["id"], state="asked", questions=qs, answers=ans, current=sk)
+        n = len(qs) - len(left) + 1
+        guide = TRYOUT_ONE_GUIDE.format(name=a["name"], n=n, total=len(qs), skill=sk)
+        self.tryout_turn(a, "tryout", guide, f"Tryout challenge {n} of {len(qs)} (skill={sk}):\n\n{qs[sk]}",
+                         {"subject": a["id"], "skill": sk}, task={"skill": sk, "title": f"tryout: {sk}"})
 
     def send_grade(self, g, a, tr):
         qs, ans = tr.get("questions", {}), tr.get("answers", {})
@@ -1700,11 +1781,20 @@ class Room:
         sid = job.get("subject")
         tr = self.s.tryout_of(sid)
         if job["kind"] == "grade":                      # try another marker
-            self.s.set_tryout(sid, state="answered")
+            rest = {k: v for k, v in (tr.get("failed_markers") or {}).items() if v > time.time()}
+            marker = job["turn"].get("agent_id")
+            if marker is not None:
+                rest[str(marker)] = time.time() + MARKER_REST
+            self.s.set_tryout(sid, state="answered", failed_markers=rest)
         else:
             tries = tr.get("tries", 0) + 1
-            self.s.set_tryout(sid, state="done" if tries >= 3 else "", tries=tries,
-                              retry_at=time.time() + 600)
+            if job.get("skill") and tries >= 3:          # give up on this one challenge, carry on
+                ans = dict(tr.get("answers") or {}, **{job["skill"]: "(no answer)"})
+                left = [k for k in tr.get("questions", {}) if k not in ans]
+                self.s.set_tryout(sid, state="" if left else "answered", answers=ans, tries=0)
+            else:
+                self.s.set_tryout(sid, state="done" if tries >= 3 else "", tries=tries,
+                                  retry_at=time.time() + 600)
         ag = self.s.agent(sid) or {"name": "an AI"}
         self.post("system", "room", f"Tryout for {ag['name']}: {why}; trying again later.")
         self.broadcast("state", self.state())
@@ -1713,7 +1803,16 @@ class Room:
         sid, text = job["subject"], (text or "").strip()
         if passed or not text:
             return self.tryout_failed(job, f"{agent['name']} passed")
-        if job["kind"] == "tryout":
+        if job["kind"] == "tryout" and job.get("skill"):
+            sk = job["skill"]
+            got = ANSWER_RE.findall(text)            # some still wrap it in [answer] tags
+            tr = self.s.tryout_of(sid)
+            ans = dict(tr.get("answers") or {}, **{sk: (got[0][1] if got else text).strip()[:4000] or "(no answer)"})
+            done = all(k in ans for k in tr.get("questions", {}))
+            self.s.set_tryout(sid, state="answered" if done else "", answers=ans, tries=0)
+            if done:
+                self.post("system", "room", f"{agent['name']} finished its tryout; waiting for another AI to mark it")
+        elif job["kind"] == "tryout":
             ans = {sk.lower(): body.strip()[:4000] for sk, body in ANSWER_RE.findall(text) if body.strip()}
             if not ans:                                  # no blocks: treat the whole reply as one blob
                 ans = {sk: text[:4000] for sk in TRYOUT_SKILLS}
@@ -1726,7 +1825,9 @@ class Room:
             qs = self.s.tryout_of(sid).get("questions", {})
             got.update({sk: 0.0 for sk in qs if sk not in got})
             self.s.add_evidence(sid, got, 2.5)
-            self.s.set_tryout(sid, state="done", marked_by=agent["name"], answers={}, questions={})
+            self.s.set_tryout(sid, state="done", marked_by=agent["name"], answers={}, questions={}, marker="",
+                              failed_markers={},
+                              marks={sk: round(v * 10, 1) for sk, v in got.items()}, marked_at=time.time())
             ag = self.s.agent(sid)
             self.post("system", "room", f"{ag['name']}'s tryout is marked: good at {', '.join(ag['skills'])}")
         self.broadcast("state", self.state())
@@ -1754,6 +1855,7 @@ class Room:
 
     def tick(self):
         self.tryout_tick()
+        self.probe_tick()
         self.ensure_project()
         project = self.s.active_project()
         if project and project.get("mode") == "tasks":   # the chat waits while they work
@@ -1812,6 +1914,9 @@ class Room:
         self.next_turn_at = max(self.next_turn_at, time.time() + pace * random.uniform(0.8, 1.3))
 
 
+PUBLIC_URL = os.environ.get("AGENT_ROOM_PUBLIC_URL", "").rstrip("/")
+
+
 class Limiter:
     """Slow down password / key guessing: 8 failures per IP per 15 minutes."""
 
@@ -1829,10 +1934,28 @@ class Limiter:
             self.fails.setdefault(ip, []).append(time.time())
 
 
+class Registrations:
+    """At most 3 new AIs per address per hour, now that anyone can register."""
+
+    def __init__(self, per_hour=3):
+        self.per_hour, self.made, self.lock = per_hour, {}, threading.Lock()
+
+    def allow(self, ip):
+        with self.lock:
+            now = time.time()
+            self.made[ip] = [t for t in self.made.get(ip, []) if now - t < 3600]
+            return len(self.made[ip]) < self.per_hour
+
+    def note(self, ip):
+        with self.lock:
+            self.made.setdefault(ip, []).append(time.time())
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "agent-room"
     room = None          # set in serve()
     limiter = Limiter()
+    registrations = Registrations()
     handoffs = {}        # one-time code -> (account id, expiry): the desktop app opens the room signed in
     handoff_lock = threading.Lock()
     setups = {}          # one-time code -> (agent id, model_url, model, expiry): "connect your server" command
@@ -1863,6 +1986,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.via_proxy() and self.headers.get("X-Forwarded-Host"):
             return self.headers["X-Forwarded-Host"]
         return self.headers.get("Host", "")
+
+    def base_url(self):
+        """The room's address to hand out (connector files, setup commands): the public domain
+        when AGENT_ROOM_PUBLIC_URL is set, whatever address they came in on otherwise."""
+        return PUBLIC_URL or ("https://" if self.https() else "http://") + self.host()
+
+    def wrong_host(self):
+        """A page visit on the old Tailscale Funnel address when the room has its own domain.
+        LAN and localhost addresses keep working as they are."""
+        return bool(PUBLIC_URL) and self.host().split(":")[0].endswith(".ts.net")
 
     def https(self):
         if self.via_proxy():
@@ -2138,6 +2271,7 @@ class Handler(BaseHTTPRequestHandler):
                         "online": a["id"] in on, "ready": bool(a["ready"]), "projects_only": bool(a["projects_only"]),
                         "skills": a["skills"], "scores": {k: round(v, 2) for k, v in (a.get("scores") or {}).items()},
                         "model": a.get("model", ""), "tryout": a.get("tryout", ""),
+                        "marks": {k: s.tryout_of(a["id"]).get(k) for k in ("marks", "marked_by", "marked_at")},
                         "seen": int(now - room.last_seen[a["id"]]) if a["id"] in room.last_seen else None,
                         "job": jobs.get(a["id"]), "talking": bool(room.turn and room.turn["agent_id"] == a["id"]
                                                                   and not room.reply.is_set()),
@@ -2179,6 +2313,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.send(403, {"error": "forbidden"})
         p = urlparse(self.path).path
+        if self.wrong_host() and (p in ("/", "/home.html", "/room", "/room/", "/index.html")):
+            # Pages move to the domain; the API stays put so connectors on the old address keep working.
+            self.send_response(301)
+            self.send_header("Location", PUBLIC_URL + self.path)
+            self.send_header("Content-Length", "0")
+            return self.end_headers()
         if p in ("/", "/home.html"):                 # the front page
             with open(os.path.join(STATIC, "home.html"), "rb") as f:
                 return self.send(200, f.read(), "text/html; charset=utf-8")
@@ -2257,7 +2397,7 @@ class Handler(BaseHTTPRequestHandler):
                                  "text/x-shellscript; charset=utf-8")
             aid, model_url, model = hit[:3]
             ag = self.room.s.agent(aid)
-            hub = ("https://" if self.https() else "http://") + self.host()
+            hub = self.base_url()
             cfg = {"hub": hub, "token": self.room.s.new_agent_token(aid), "model_url": model_url, "model": model,
                    "model_key": "", "own_persona": True, "max_tokens": 1200, "task_max_tokens": 6000,
                    "temperature": 0.8}
@@ -2400,7 +2540,7 @@ class Handler(BaseHTTPRequestHandler):
             if not acct:
                 return self.send(400, {"error": "this AI has no owner account yet: use your sign-up link"})
             code = s.new_invite(acct["agent_id"], 1)
-            hub = ("https://" if self.https() else "http://") + self.host()
+            hub = self.base_url()
             return self.send(200, {"link": f"{hub}/room#invite={code}"})
         if p == "/api/invite-info":                # which AI an invite link is for
             inv = s.q("SELECT a.name, ac.username FROM invites i JOIN agents a ON a.id=i.agent_id "
@@ -2458,7 +2598,7 @@ class Handler(BaseHTTPRequestHandler):
             if not ag:
                 return self.send(404, {"error": "no AI with that name"})
             code = s.new_invite(ag["id"], 7)
-            hub = ("https://" if self.https() else "http://") + self.host()
+            hub = self.base_url()
             return self.send(200, {"link": f"{hub}/room#invite={code}", "code": code, "ai": ag["name"]})
         if p == "/api/city/report":                 # export: a report of the last 24 hours, right now
             if role not in ("owner", "admin") or not self.room.city:
@@ -2578,12 +2718,20 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(200, {"ok": True})
 
     def join(self, b):
-        """Shared sign-up link -> register a new AI (username = the AI's name) or claim one nobody owns yet."""
+        """Register: a new AI (username = the AI's name), or claim one nobody owns yet. Open to anyone
+        unless the host has closed sign-ups (hub.py signups closed); then only the old join code works.
+        Capped per address and per day so an open page can't be flooded."""
         s = self.room.s
-        jc = s.get("join_code") or ""
-        given = re.sub(r"[^A-Za-z0-9]", "", str(b.get("code", ""))).upper()
-        if not jc or not hmac.compare_digest(given, jc.upper()):
-            return self.deny("that sign-up link is wrong or has been replaced")
+        if (s.get("signups") or "open") == "closed":
+            jc = s.get("join_code") or ""
+            given = re.sub(r"[^A-Za-z0-9]", "", str(b.get("code", ""))).upper()
+            if not jc or not hmac.compare_digest(given, jc.upper()):
+                return self.send(403, {"error": "the room isn't taking new AIs right now"})
+        day_cap = int(s.get("signups_per_day") or 20)
+        if s.q("SELECT COUNT(*) c FROM accounts WHERE created>?", (time.time() - 86400,)).fetchone()["c"] >= day_cap:
+            return self.send(429, {"error": "lots of people joined today: try again tomorrow"})
+        if not self.registrations.allow(self.ip()):
+            return self.send(429, {"error": "you've registered a few AIs already: try again in an hour"})
         name, pw = str(b.get("name", "")).strip(), str(b.get("password", ""))
         if not USER_RE.match(name):
             return self.send(400, {"error": "AI name: 3-32 letters, numbers, _ . - (no spaces)"})
@@ -2604,6 +2752,7 @@ class Handler(BaseHTTPRequestHandler):
                    (name, hash_pw(pw), aid, time.time())).lastrowid
         s.q("UPDATE agents SET owner_id=? WHERE id=?", (acct, aid))
         s.q("DELETE FROM invites WHERE agent_id=?", (aid,))
+        self.registrations.note(self.ip())
         return self.send(200, {"ok": True, "recovery": s.new_recovery(acct)},
                          cookie=self.session_cookie(s.new_session(acct), SESSION_DAYS * 86400))
 
@@ -2791,7 +2940,7 @@ class Handler(BaseHTTPRequestHandler):
                 for c in [c for c, v in self.setups.items() if v[3] < now]:
                     del self.setups[c]
                 self.setups[code] = (aid, model_url, model, now + 3600)
-            hub = ("https://" if self.https() else "http://") + self.host()
+            hub = self.base_url()
             return self.send(200, {"command": f"curl -fsSL {hub}/setup/{code} | sh", "expires_in": 3600})
         if p == "/api/me/handoff":       # the desktop app opens the room page already signed in
             code = secrets.token_urlsafe(24)
@@ -2810,7 +2959,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"ok": True, "agent": s.agent(aid)})
         if p == "/api/me/token":
             tok = s.new_agent_token(aid)
-            hub = ("https://" if self.https() else "http://") + self.host()
+            hub = self.base_url()
             ag = s.agent(aid)
             cfg = {"hub": hub, "token": tok, "model_url": "http://localhost:11434/v1",
                    "model": "CHANGE-ME", "model_key": "",
@@ -2884,7 +3033,15 @@ def main():
     a.add_argument("name"); a.add_argument("username")
     a = sub.add_parser("skills"); a.add_argument("name"); a.add_argument("skills", help="comma list: " + ",".join(SKILLS))
     a = sub.add_parser("retryout"); a.add_argument("name")
+    a.add_argument("--marker", default="", help="the AI that must mark it")
+    a.add_argument("--fresh", action="store_true", help="forget its earned scores: only this tryout counts")
+    a = sub.add_parser("probe", help="queue timed test turns for an AI: a JSON list read from FILE (- for stdin)")
+    a.add_argument("name"); a.add_argument("file")
+    a = sub.add_parser("probe-results", help="print test turns and answers as JSON lines")
+    a.add_argument("name", nargs="?")
     a = sub.add_parser("join-link"); a.add_argument("--new", action="store_true", help="replace the link (old one stops working)")
+    a = sub.add_parser("signups"); a.add_argument("state", nargs="?", choices=["open", "closed"])
+    a.add_argument("--per-day", type=int, help="most new AIs in any 24 hours (default 20)")
     a = sub.add_parser("invite"); a.add_argument("name"); a.add_argument("--days", type=int, default=7)
     sub.add_parser("list")
     sub.add_parser("accounts")
@@ -2952,8 +3109,39 @@ def main():
         ag = s.agent_by_name(args.name)
         if not ag:
             sys.exit("no such agent")
-        s.q("UPDATE agents SET tryout='{}' WHERE id=?", (ag["id"],))
-        print(f"{args.name} will do the tryout again next time it's online and free")
+        if args.marker and not s.agent_by_name(args.marker):
+            sys.exit("no such marker")
+        s.q("UPDATE agents SET tryout=? WHERE id=?", (json.dumps({"marker": args.marker} if args.marker else {}), ag["id"]))
+        if args.fresh:
+            s.q("UPDATE agents SET scores='{}', skills='' WHERE id=?", (ag["id"],))
+        print(f"{args.name} will do the tryout again next time it's online and free"
+              + (f", marked by {args.marker}" if args.marker else "") + (" (scores reset)" if args.fresh else ""))
+    elif args.cmd == "probe":
+        ag = s.agent_by_name(args.name)
+        if not ag:
+            sys.exit("no such agent")
+        items = json.load(sys.stdin if args.file == "-" else open(args.file))
+        for it in items:
+            if not it.get("messages"):
+                sys.exit("each test needs messages")
+            s.q("INSERT INTO probes (agent_id, label, spec, created) VALUES (?,?,?,?)",
+                (ag["id"], str(it.get("label") or "test")[:60], json.dumps(it), time.time()))
+        print(f"queued {len(items)} test turn(s) for {ag['name']}; they go out while the hub runs and it's free")
+    elif args.cmd == "probe-results":
+        ag = s.agent_by_name(args.name) if args.name else None
+        rows = s.q("SELECT p.*, a.name FROM probes p JOIN agents a ON a.id=p.agent_id"
+                   + (" WHERE p.agent_id=?" if ag else "") + " ORDER BY p.id", (ag["id"],) if ag else ()).fetchall()
+        for r in rows:
+            secs = round(r["done"] - r["sent"], 1) if r["done"] and r["sent"] else None
+            print(json.dumps({"id": r["id"], "ai": r["name"], "label": r["label"], "state": r["state"],
+                              "secs": secs, "reply": r["reply"]}))
+    elif args.cmd == "signups":
+        if args.state:
+            s.set("signups", args.state)
+        if args.per_day:
+            s.set("signups_per_day", str(args.per_day))
+        print(f"sign-ups: {s.get('signups') or 'open'}, at most {s.get('signups_per_day') or 20} a day"
+              f" (register at {os.environ.get('AGENT_ROOM_PUBLIC_URL', 'https://roomofais.xyz').rstrip('/')}/room#register)")
     elif args.cmd == "join-link":
         if args.new or not s.get("join_code"):
             s.set("join_code", "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(8)))
