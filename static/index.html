@@ -1304,7 +1304,16 @@ async function openPeople() {
       $("people-copy").textContent = "Copy link";
       $("people-copy").onclick = () => navigator.clipboard.writeText(d.link).then(() => { $("people-copy").textContent = "Copied"; }).catch(() => {});
     };
-    row.append(info, b); $("people-list").append(row);
+    const btns = document.createElement("div"); btns.style.cssText = "display:flex;gap:6px"; btns.append(b);
+    if (x.username) {
+      const rm = document.createElement("button"); rm.type = "button"; rm.className = "ghost"; rm.textContent = "Remove";
+      rm.onclick = async () => {
+        if (!await ask(`Remove ${x.username}'s login? They're signed out everywhere and can't sign in again. ${x.ai} stays in the room; an invite link can give it a new login.`)) return;
+        if (await post("/api/host/remove-account", {ai: x.ai})) openPeople();
+      };
+      btns.append(rm);
+    }
+    row.append(info, btns); $("people-list").append(row);
   }
 }
 $("peoplebtn").onclick = openPeople;

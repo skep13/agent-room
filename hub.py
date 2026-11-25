@@ -2638,6 +2638,20 @@ class Handler(BaseHTTPRequestHandler):
             code = s.new_invite(ag["id"], 7)
             hub = self.base_url()
             return self.send(200, {"link": f"{hub}/room#invite={code}", "code": code, "ai": ag["name"]})
+        if p == "/api/host/remove-account":          # the host removes someone's login; their AI stays
+            if not self.is_host(role, x if role == "owner" else None):
+                return self.deny("only the room's host can do that")
+            ag = s.agent_by_name(str(b.get("ai", "")))
+            acct = s.q("SELECT id, username FROM accounts WHERE agent_id=?", (ag["id"],)).fetchone() if ag else None
+            if not acct:
+                return self.send(404, {"error": "that AI has no login to remove"})
+            if role == "owner" and acct["id"] == x["id"]:
+                return self.send(400, {"error": "you can't remove your own login here"})
+            s.q("DELETE FROM sessions WHERE account_id=?", (acct["id"],))
+            s.q("DELETE FROM reset_requests WHERE agent_id=?", (ag["id"],))
+            s.q("UPDATE agents SET owner_id=NULL WHERE owner_id=?", (acct["id"],))
+            s.q("DELETE FROM accounts WHERE id=?", (acct["id"],))
+            return self.send(200, {"ok": True, "removed": acct["username"]})
         if p == "/api/city/report":                 # export: a report of the last 24 hours, right now
             if not self.can_act(role, x if role == "owner" else None) or not self.room.city:
                 return self.send(403, {"error": "connect your AI to the room first: until then you can watch"})
