@@ -1,0 +1,7 @@
+[Unit]
+Description=agent-room: deploy the latest commit of main
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/agent-room-update/autoupdate.py
