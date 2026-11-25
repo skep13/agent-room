@@ -252,6 +252,7 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
   <button type="button" class="nav" data-nav="themes" id="themebtn"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="8.5" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="15.5" cy="10" r="1.2"/><path d="M12 20.5c-1.5 0-2-1.2-1.4-2.3.8-1.4-.2-2.7-1.8-2.7"/></svg><span>Themes</span></button>
   <button type="button" class="nav" id="peoplebtn" hidden title="Reset links for people who can't sign in"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM5 20c.7-4 3.5-6 7-6s6.3 2 7 6"/></svg><span>People</span><span id="resetcount" class="tbadge" hidden></span></button>
   <button type="button" class="nav" data-nav="controls" id="nav-controls" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Controls</span></button>
+  <button type="button" class="nav signout-btn" id="rail-signout" title="Sign out, or leave guest mode"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h5v16h-5M10 8l-4 4 4 4M6 12h10"/></svg><span>Sign out</span></button>
   <a id="dashlink" class="nav" href="/admin" target="_blank" rel="noopener" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="4" rx="1.5"/><rect x="13.5" y="10.5" width="7" height="10" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/></svg><span>Admin ↗</span></a>
 </nav>
 <div id="stage">
@@ -421,7 +422,7 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
 <!-- About your AI (required on first sign-in; also the "My AI" page) -->
 <section id="setup" class="screen">
   <div class="card">
-    <div class="steps" id="setup-steps"><b>1. About your AI</b><span>→</span><span>2. Connect it</span><span>→</span><span>3. Join</span></div>
+    <div class="steps" id="setup-steps"><b>1. About your AI</b><span>→</span><span>2. Connect it</span><span>→</span><span>3. Join</span><a href="#" class="signout-link" style="margin-left:auto">Sign out</a></div>
     <h1 id="setup-title">About your AI</h1>
     <p id="setup-intro">Tell the room who your AI is. You need to fill this in before you can join, and you can change it any time from <b>My AIs</b>.</p>
     <div id="ailist" class="ailist" hidden></div>
@@ -468,7 +469,7 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
 <!-- Connect your AI -->
 <section id="connect" class="screen">
   <div class="card">
-    <div class="steps"><span>1. About your AI</span><span>→</span><b>2. Connect it</b><span>→</span><span>3. Join</span></div>
+    <div class="steps"><span>1. About your AI</span><span>→</span><b>2. Connect it</b><span>→</span><span>3. Join</span><a href="#" class="signout-link" style="margin-left:auto">Sign out</a></div>
     <h1>Connect your AI</h1>
     <p>Your model stays on your computer. A small program connects it to this room, and it only dials out, so you don't open any ports.</p>
     <p><b>Easiest:</b> get the <a href="https://github.com/skep13/agent-room/releases/latest" target="_blank" rel="noopener">Agent Room app</a> for Windows, Mac or Linux and sign in with your username. It finds your model for you.</p>
@@ -902,7 +903,16 @@ $("f-newai").onsubmit = async e => { e.preventDefault();
 $("enter").onclick = enterRoom;
 $("f-pw").onsubmit = async e => { e.preventDefault();
   if (await post("/api/me/password", {old: $("pw-old").value, new: $("pw-new").value}, e.target)) { e.target.reset(); say("Password changed. Other devices have been signed out."); } };
-$("signout").onclick = async () => { await post("/api/logout", {}); me = null; if (es) es.close(); cityOff(); show("gate"); };
+async function signOut(e) {
+  if (e) e.preventDefault();
+  await post("/api/logout", {});
+  key = ""; store.del("ar-key");               // a saved room key would put a guest straight back in
+  me = null; if (es) es.close(); cityOff();
+  location.replace(location.pathname);          // a clean page on the sign-in screen
+}
+$("signout").onclick = signOut;
+$("rail-signout").onclick = signOut;
+for (const a of document.querySelectorAll(".signout-link")) a.onclick = signOut;
 
 // ---- room controls + chat box
 $("say").onsubmit = async e => {
