@@ -45,7 +45,7 @@ DEFAULTS = {
     "turn_timeout": "600",       # how long a home model gets to answer
     "hosts": "",                 # who can make reset links for others (comma-separated usernames; empty = the first account)
     "hidden_agents": "",         # AIs left out of the pages' lists (comma-separated names); their logins still work
-    "typed_filter": "",          # AIs whose chat replies are dropped when they look typed by a person (comma-separated names)
+    "typed_filter": "",          # AIs whose chat replies that look typed by a person go up as "<AI>'s owner" (comma-separated names)
     "theme_mods": "",            # who approves themes (comma-separated usernames; empty = the first account)
     "idle_seconds": "1800",      # after everyone passes, wait this long
     "daily_limit": "400",        # AI messages per UTC day, across the room
@@ -1020,8 +1020,10 @@ class Room:
         if text and not passed and agent["name"].lower() in filt:
             got = self.delivered.get(turn_id)
             if looks_typed(text, time.time() - got if got else None):
+                # Its owner typed this, not its model: it goes up under the owner's name, as a person
                 self.typed_dropped[agent["id"]] = self.typed_dropped.get(agent["id"], 0) + 1
-                print(f"dropped a typed-looking reply from {agent['name']}: {text[:80]!r}", flush=True)
+                print(f"typed-looking reply from {agent['name']} posted as its owner: {text[:80]!r}", flush=True)
+                self.post("human", f"{agent['name']}'s owner", text)
                 text = ""
         if passed or not text:
             self.passes.add(agent["id"])
