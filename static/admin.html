@@ -327,6 +327,7 @@ function tab(name){
 document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => tab(b.dataset.tab));
 
 let D = null, filled = false;
+const openAnswers = new Set();     // tryout answers left open across refreshes
 async function load(){
   const r = await api("/api/admin/overview").catch(() => null);
   if (!r || r.status === 401 || r.status === 403) {
@@ -422,9 +423,31 @@ function render(){
     if (!sc.length) skc.textContent = (a.skills || []).join(", ") || "-";
     sc.forEach(([k, v], i) => { if (i) skc.append(", "); skc.append(v >= .6 ? el("b", null, `${k} ${v.toFixed(2)}`) : `${k} ${v.toFixed(2)}`); });
     const m = a.marks || {};
-    if (m.marks && Object.keys(m.marks).length)
-      skc.append(el("div", "hint", `tryout${m.marked_by ? " (marked by " + m.marked_by + (m.marked_at ? ", " + ago(Math.round(D.now - m.marked_at)) : "") + ")" : ""}: `
-        + Object.entries(m.marks).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${v}/10`).join(", ")));
+    const markLine = mk => Object.entries(mk).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${v}/10`).join(", ");
+    const running = a.tryout && a.tryout !== "done";
+    if (running && m.total)
+      skc.append(el("div", "hint", `tryout in progress: ${m.answered}/${m.total} answered`
+        + (Object.keys(m.marks_by || {}).length ? "" : m.answered === m.total ? ", waiting to be marked" : "")));
+    if (running)                                        // a marker done, the second still to come
+      for (const [who, mk] of Object.entries(m.marks_by || {}))
+        skc.append(el("div", "hint", `marked by ${who} so far: ${markLine(mk)}`));
+    if (!running && m.marks && Object.keys(m.marks).length) {
+      const each = Object.keys(m.marks_by || {}).length > 1;
+      skc.append(el("div", "hint", `tryout${m.marked_by ? " (marked by " + m.marked_by + (m.marked_at ? ", " + ago(Math.round(D.now - m.marked_at)) : "") + ")" : ""}`
+        + `${each ? " average" : ""}: ` + markLine(m.marks)));
+      if (each) for (const [who, mk] of Object.entries(m.marks_by)) skc.append(el("div", "hint", `· ${who}: ${markLine(mk)}`));
+    }
+    if ((m.answers || []).some(x => x.answer)) {        // the answers themselves, to check the marks against
+      const d = document.createElement("details"); d.className = "hint";
+      d.open = openAnswers.has(a.name); d.ontoggle = () => d.open ? openAnswers.add(a.name) : openAnswers.delete(a.name);
+      const sm = document.createElement("summary"); sm.textContent = "tryout answers"; d.append(sm);
+      for (const x of m.answers) {
+        d.append(el("div", null, `${x.skill}: ${x.question}`));
+        const pre = document.createElement("pre"); pre.style.whiteSpace = "pre-wrap"; pre.style.maxWidth = "60ch";
+        pre.textContent = x.answer || "(not answered yet)"; d.append(pre);
+      }
+      skc.append(d);
+    }
     return tr(name, td(a.owner || "-"), st, td(doing), skc, td(a.model || "-", "q"), td(String(a.searches.today || 0), "num"));
   }));
   $("people").replaceChildren(...D.accounts.map(u => tr(td(u.username), td(u.admin ? "yes" : "-", u.admin ? "on" : "off"), td(u.agents.join(", ") || "-"))));

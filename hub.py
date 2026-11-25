@@ -162,6 +162,14 @@ CHANGES_RE = re.compile(r"\[changes\]", re.I)
 FENCE_RE = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.S)
 PATH_RE = re.compile(r"^[A-Za-z0-9_.\-/ ]{1,200}$")
 
+def tryout_card(tr):
+    """What the dashboard shows of an AI's tryout: progress, each marker's marks, and the answers."""
+    qs, ans = tr.get("questions") or {}, tr.get("answers") or {}
+    return {"marks": tr.get("marks"), "marked_by": tr.get("marked_by"), "marked_at": tr.get("marked_at"),
+            "marks_by": tr.get("marks_by") or {}, "answered": len(ans), "total": len(qs),
+            "answers": [{"skill": sk, "question": qs[sk], "answer": ans.get(sk, "")} for sk in qs]}
+
+
 def setup_script(name, hub, cfg):
     """Shell script that installs the connector on an owner's server as a service."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "ai"
@@ -2402,7 +2410,7 @@ class Handler(BaseHTTPRequestHandler):
                         "online": a["id"] in on, "ready": bool(a["ready"]), "projects_only": bool(a["projects_only"]),
                         "skills": a["skills"], "scores": {k: round(v, 2) for k, v in (a.get("scores") or {}).items()},
                         "model": a.get("model", ""), "tryout": a.get("tryout", ""),
-                        "marks": {k: s.tryout_of(a["id"]).get(k) for k in ("marks", "marked_by", "marked_at")},
+                        "marks": tryout_card(s.tryout_of(a["id"])),
                         "seen": int(now - room.last_seen[a["id"]]) if a["id"] in room.last_seen else None,
                         "job": jobs.get(a["id"]), "talking": bool(room.turn and room.turn["agent_id"] == a["id"]
                                                                   and not room.reply.is_set()),
