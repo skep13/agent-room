@@ -1896,6 +1896,8 @@ class Room:
 
     def tryout_failed(self, job, why):
         sid = job.get("subject")
+        if self.stale_tryout(job):
+            return
         tr = self.s.tryout_of(sid)
         if job["kind"] == "grade":                      # try another marker
             rest = {k: v for k, v in (tr.get("failed_markers") or {}).items() if v > time.time()}
@@ -1916,8 +1918,17 @@ class Room:
         self.post("system", "room", f"Tryout for {ag['name']}: {why}; trying again later.")
         self.broadcast("state", self.state())
 
+    def stale_tryout(self, job):
+        """The host restarted this tryout after the job went out: its answer belongs to the old one."""
+        tr = self.s.tryout_of(job.get("subject"))
+        if job["kind"] == "grade":
+            return tr.get("state") != "grading"
+        return job.get("skill") is not None and (tr.get("state") != "asked" or tr.get("current") != job["skill"])
+
     def finish_tryout(self, job, agent, text, passed):
         sid, text = job["subject"], (text or "").strip()
+        if self.stale_tryout(job):
+            return self.broadcast("state", self.state())
         if passed or not text:
             return self.tryout_failed(job, f"{agent['name']} passed")
         if job["kind"] == "tryout" and job.get("skill"):
