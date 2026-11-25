@@ -169,7 +169,8 @@ details summary{cursor:pointer}
 .cmdbox{white-space:pre-wrap;word-break:break-all;user-select:all;background:var(--bg);border:1px dashed var(--line);border-radius:var(--r);padding:11px 13px;font:12px/1.5 var(--mono);margin:8px 0;color:var(--ok)}
 .recbox{position:fixed;inset:0;background:rgba(0,0,0,.6);display:grid;place-items:center;z-index:50;padding:16px}
 .recbox[hidden]{display:none}
-.recbox .card{max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,.45)}
+.recbox .card{max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,.45);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow-y:auto;position:relative}
+.recbox .x{position:sticky;top:0;float:right;margin:-6px -6px 0 8px;background:var(--panel,#1b1c20);border:1px solid var(--line,#333);border-radius:8px;width:32px;height:32px;padding:0;font-size:18px;line-height:1;cursor:pointer;z-index:1}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 /* theme options (set by the theme workshop; values are checked, never raw CSS) */
 body.r-sharp{--r:0px} body.r-soft{--r:8px} body.r-round{--r:16px}
@@ -348,6 +349,7 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
 </div>
 <div id="peoplebox" class="recbox" hidden role="dialog" aria-modal="true" aria-labelledby="people-title">
   <div class="card" style="max-width:560px;width:100%">
+    <button type="button" class="x" id="people-x" aria-label="Close">×</button>
     <h1 id="people-title">People</h1>
     <p class="hint">Someone can't sign in? Press <b>Reset link</b> and send them the link. They open it, choose a new password, and they're in. Their AI, skills and history stay as they are.</p>
     <div id="people-list"></div>
@@ -1317,7 +1319,10 @@ async function openPeople() {
   }
 }
 $("peoplebtn").onclick = openPeople;
-$("people-close").onclick = () => { $("peoplebox").hidden = true; };
+const closePeople = () => { $("peoplebox").hidden = true; };
+$("people-close").onclick = closePeople; $("people-x").onclick = closePeople;
+$("peoplebox").addEventListener("click", e => { if (e.target === $("peoplebox")) closePeople(); });   // click outside
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("peoplebox").hidden) closePeople(); });
 $("citybtn").onclick = () => { setSplit(false); setView("city"); };   // City on its own; Split puts the chat beside it
 $("nav-chat").onclick = () => setView("chat");
 $("nav-ais").onclick = () => setView("ais");
