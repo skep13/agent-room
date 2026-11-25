@@ -2770,7 +2770,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(200, {"ok": True})
 
     def join(self, b):
-        """Register: a new AI (username = the AI's name), or claim one nobody owns yet. Open to anyone
+        """Register a new AI (username = the AI's name). Open to anyone
         unless the host has closed sign-ups (hub.py signups closed); then only the old join code works.
         Capped per address and per day so an open page can't be flooded."""
         s = self.room.s
@@ -2789,17 +2789,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, {"error": "AI name: 3-32 letters, numbers, _ . - (no spaces)"})
         if len(pw) < 10:
             return self.send(400, {"error": "password: at least 10 characters"})
-        if s.q("SELECT 1 FROM accounts WHERE username=?", (name,)).fetchone():
-            return self.send(400, {"error": "that name is taken: pick another, or sign in"})
-        ag = s.q("SELECT id, owner_id FROM agents WHERE name=?", (name,)).fetchone()
-        if ag and ag["owner_id"]:
-            return self.send(400, {"error": "an AI with that name already has an owner"})
-        if not ag:
-            n = s.q("SELECT COUNT(*) c FROM agents").fetchone()["c"]
-            aid = s.q("INSERT INTO agents(name,token_hash,about,color,created,owner_id,skills,ready) VALUES(?,?,?,?,?,?,?,?)",
-                      (name, h("ar_" + secrets.token_urlsafe(32)), "", COLORS[n % len(COLORS)], time.time(), None, "", 0)).lastrowid
-        else:
-            aid = ag["id"]
+        # Registering only ever makes a NEW AI. An AI already in the room (even one with no login, like a
+        # connector the host added by hand) is never handed to whoever types its name: its owner gets an
+        # invite link from the host instead. Names are compared ignoring case so look-alikes can't sneak in.
+        if s.q("SELECT 1 FROM accounts WHERE lower(username)=lower(?)", (name,)).fetchone() or \
+                s.q("SELECT 1 FROM agents WHERE lower(name)=lower(?)", (name,)).fetchone():
+            return self.send(400, {"error": "that name is taken: pick another, or sign in. If it's your AI and "
+                                            "you can't sign in, ask the room's host for a reset link"})
+        n = s.q("SELECT COUNT(*) c FROM agents").fetchone()["c"]
+        aid = s.q("INSERT INTO agents(name,token_hash,about,color,created,owner_id,skills,ready) VALUES(?,?,?,?,?,?,?,?)",
+                  (name, h("ar_" + secrets.token_urlsafe(32)), "", COLORS[n % len(COLORS)], time.time(), None, "", 0)).lastrowid
         acct = s.q("INSERT INTO accounts(username,pw_hash,agent_id,created) VALUES(?,?,?,?)",
                    (name, hash_pw(pw), aid, time.time())).lastrowid
         s.q("UPDATE agents SET owner_id=? WHERE id=?", (acct, aid))
@@ -2824,7 +2823,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(pw) < 10:
             return self.send(400, {"error": "password: at least 10 characters"})
         aid = inv["agent_id"]
-        clash = s.q("SELECT agent_id FROM accounts WHERE username=?", (user,)).fetchone()
+        clash = s.q("SELECT agent_id FROM accounts WHERE lower(username)=lower(?)", (user,)).fetchone()
         if clash and clash["agent_id"] != aid:
             return self.send(400, {"error": "that username is taken"})
         s.q("DELETE FROM invites WHERE agent_id=?", (aid,))
