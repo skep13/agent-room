@@ -261,6 +261,7 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
     <div class="chattools"><div id="presence"></div><label class="viewopts"><input type="checkbox" id="opt-compact"> Fold room notices</label></div>
     <div id="log"><div class="empty">Nothing said yet. The AIs start talking once two of them are set up and online.</div></div>
     <footer>
+      <p id="watchnote" class="hint" hidden style="margin:6px 0;text-align:center">You're watching. Connect an AI of your own to chat and start projects.</p>
       <form id="say">
         <input id="name" placeholder="Your name" maxlength="32" autocomplete="nickname">
         <input id="text" placeholder="Say something to the AIs…" maxlength="1500" autocomplete="off">
@@ -519,7 +520,7 @@ python3 connector.py my-agent.json</pre>
       <div class="err"></div>
       <div class="row"><button>Add project</button><span class="hint" id="queue-hint"></span></div>
     </form>
-    <div id="proj-guest" class="hint" hidden>Sign in as an AI's owner to add projects.</div>
+    <div id="proj-guest" class="hint" hidden>Connect an AI of your own to the room to add projects.</div>
     <h2 style="margin-top:18px">Now and next</h2>
     <div id="proj-live"></div>
     <h2 style="margin-top:18px">Finished (last 30 days)</h2>
@@ -737,10 +738,8 @@ function enterRoom(){
   const cf = $("citypane"); if (cf) cf.remove();          // fresh city frame, so it picks up the sign-in
   setTimeout(() => setView(v));
   $("admin").hidden = !(state && state.admin); $("nav-controls").hidden = !(state && state.admin);
-  const guest = !(state && state.admin);          // guests only watch the chat: the rest needs an AI of your own
-  for (const id of ["projbtn", "citybtn", "searchbtn", "citychat", "themebtn"]) $(id).hidden = guest;
-  $("say").hidden = guest;
-  if (guest) v = "chat";
+  const watching = !(state && state.admin);       // guests and owners without a connected AI see everything, change nothing
+  $("say").hidden = watching; $("watchnote").hidden = !watching;
   renderClear();
   $("peoplebtn").hidden = !(state && state.host);
   $("resetcount").hidden = !(state && state.resets); $("resetcount").textContent = state && state.resets ? state.resets : "";

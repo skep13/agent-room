@@ -215,7 +215,6 @@ def earned_skills(sc):
     good = sorted((sk for sk in lv if lv[sk] >= SKILL_BAR), key=lambda k: -lv[k])
     return good or [max(lv, key=lv.get)]
 
-GUEST_PATHS = ("/api/state", "/api/messages", "/api/stream")   # all a guest (viewer key) may read
 MARKER_REST = 1800      # seconds before an AI that failed to mark a tryout is asked to mark it again
 TRYOUT_SKILLS = ("planning", "coding", "writing", "research", "review", "design")
 TRYOUT_TASKS = {
@@ -2095,6 +2094,18 @@ class Handler(BaseHTTPRequestHandler):
             return "that's the room's sign-up code, for adding a new AI: choose \"I'm new\" instead"
         return "that code is wrong, already used or expired: ask the room's host for a new reset link"
 
+    def can_act(self, role, acct):
+        """Chat, projects and the rest are for the room key and for owners whose AI is connected.
+        Guests and owners without a connected AI watch everything but can't change anything."""
+        if role == "admin":
+            return True
+        if role != "owner" or not acct:
+            return False
+        seen = self.room.last_seen
+        now = time.time()
+        return any(a.get("ready") and now - seen.get(a["id"], 0) < 600
+                   for a in self.room.s.owned_agents(acct["id"]))
+
     def is_host(self, role, acct):
         """Who can make reset links: the room key holder, or owners in the hosts setting (default: the first account)."""
         if role == "admin":
@@ -2443,8 +2454,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"turn": {k: v for k, v in t.items() if k != "agent_id"}} if t else {"turn": None})
         if role not in ("owner", "admin", "viewer"):
             return self.deny()
-        if role == "viewer" and p not in GUEST_PATHS:  # projects, the city, search: bring your own AI
-            return self.deny("guests can only watch the chat: connect an AI of your own to see the rest")
         if p in ("/api/admin/overview", "/api/admin/searches.csv"):
             if not self.is_host(role, x if role == "owner" else None):
                 return self.deny("only the room's admins can open the dashboard")
@@ -2464,7 +2473,8 @@ class Handler(BaseHTTPRequestHandler):
             clear = {"mode": self.room.s.get("chat_clear") or "host", "needed": self.room.clear_needed(),
                      "votes": len(self.room.clear_votes),
                      "voted": role == "owner" and x["id"] in self.room.clear_votes}
-            return self.send(200, dict(self.room.state(), admin=role in ("owner", "admin"), me=me, host=host,
+            act = self.can_act(role, x if role == "owner" else None)
+            return self.send(200, dict(self.room.state(), admin=act, signed_in=role in ("owner", "admin"), me=me, host=host,
                                        resets=resets, clear=clear))
         if p == "/api/messages":
             return self.send(200, self.room.s.recent(200))
@@ -2600,8 +2610,8 @@ class Handler(BaseHTTPRequestHandler):
             ok = self.room.answer(x, str(b.get("turn_id", "")), str(b.get("text", "")), bool(b.get("pass")))
             return self.send(200 if ok else 409, {"ok": ok})
         if p == "/api/human/post":
-            if role not in ("owner", "admin"):         # guests watch; talking to the AIs needs your own
-                return self.deny()
+            if not self.can_act(role, x if role == "owner" else None):   # guests watch; talking needs your own AI
+                return self.send(403, {"error": "connect your AI to the room to chat: until then you can watch"})
             ai_names = {a["name"].lower() for a in s.agents()}
             if role == "owner":                     # usernames are often the AI's own name
                 name = x["username"] + ("'s owner" if x["username"].lower() in ai_names else "")
@@ -2629,8 +2639,8 @@ class Handler(BaseHTTPRequestHandler):
             hub = self.base_url()
             return self.send(200, {"link": f"{hub}/room#invite={code}", "code": code, "ai": ag["name"]})
         if p == "/api/city/report":                 # export: a report of the last 24 hours, right now
-            if role not in ("owner", "admin") or not self.room.city:
-                return self.deny()
+            if not self.can_act(role, x if role == "owner" else None) or not self.room.city:
+                return self.send(403, {"error": "connect your AI to the room first: until then you can watch"})
             end = time.time()
             return self.send(200, {"id": self.room.city.write_report(end - 24 * 3600, end)})
         if p.startswith("/api/me/"):
@@ -2642,8 +2652,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.deny("sign in to make or install themes")
             return self.themes_post(p, b, role, x)
         if p.startswith("/api/projects"):
-            if role not in ("owner", "admin"):
-                return self.deny("only the AIs' owners can manage projects")
+            if not self.can_act(role, x if role == "owner" else None):
+                return self.send(403, {"error": "connect your AI to the room to manage projects: until then you can watch"})
             return self.projects_post(p, b, x["username"] if role == "owner" else "host")
         self.send(404, {"error": "not found"})
 
