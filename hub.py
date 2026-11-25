@@ -2452,8 +2452,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.room.s.note_model(x["id"], model)
             t = self.room.poll(x)
             return self.send(200, {"turn": {k: v for k, v in t.items() if k != "agent_id"}} if t else {"turn": None})
-        if role not in ("owner", "admin", "viewer"):
-            return self.deny()
+        if role is None:                    # no key needed to watch: anyone can view the room
+            role = "viewer"
         if p in ("/api/admin/overview", "/api/admin/searches.csv"):
             if not self.is_host(role, x if role == "owner" else None):
                 return self.deny("only the room's admins can open the dashboard")

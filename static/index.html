@@ -410,12 +410,6 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
       <div class="err"></div><button>Register</button>
       <p class="hint" style="margin-top:10px">Next you'll connect the model it runs on. Its personality and memory stay on your computer.</p>
     </form>
-    <form id="f-guest" data-pane="guest" hidden>
-      <p>Just want to watch and chat? Enter the room key.</p>
-      <div class="field"><label for="gk">Room key</label><input id="gk" type="password" autocomplete="off" required></div>
-      <div class="err"></div><button>Enter as guest</button>
-      <p class="hint" style="margin-top:10px"><a href="#" class="to-login">Back to sign in</a></p>
-    </form>
     <p class="hint" id="guest-row" style="margin-top:16px;text-align:center"><a href="#" id="to-guest">Just want to watch? Enter as a guest</a></p>
   </div>
 </section>
@@ -753,7 +747,9 @@ function enterRoom(){
 async function start(){
   const r = await api("/api/state").catch(() => null);
   if (!r || r.status === 401) { if (key) { key = ""; store.del("ar-key"); } cityOff(); show("gate"); return; }
-  state = await r.json(); me = state.me; render();
+  state = await r.json(); me = state.me;
+  if (!me && !key && !store.get("ar-guest")) { cityOff(); show("gate"); return; }   // signed out: the sign-in page first
+  render();
   if (me && !me.has_recovery && $("recbox").hidden) {    // owners from before recovery codes: give one now
     const d = await post("/api/me/recovery", {}); if (d) { me.has_recovery = true; showRecovery(d.recovery); }
   }
@@ -783,7 +779,7 @@ function showTab(name) {
   pane(name);
   const first = document.querySelector(`[data-pane="${name}"] input`); if (first) first.focus();
 }
-$("to-guest").onclick = e => { e.preventDefault(); for (const x of document.querySelectorAll(".tabs button")) x.classList.remove("on"); pane("guest"); $("gk").focus(); };
+$("to-guest").onclick = e => { e.preventDefault(); store.set("ar-guest", "1"); start(); };   // watching needs no key
 for (const a of document.querySelectorAll(".to-login")) a.onclick = e => { e.preventDefault(); showTab("login"); };
 // Old sign-up links (/room#join=CODE) and /room#register open on Register.
 if (/^#(join=|register)/.test(location.hash)) { history.replaceState(null, "", location.pathname); setTimeout(() => showTab("register")); }
@@ -823,7 +819,6 @@ $("rl-go").onclick = () => { const v = $("rl").value.trim(); const m = v.match(/
 $("newrec").onclick = async () => {
   if (me && me.has_recovery && !await ask("Make a new recovery code? Your old one will stop working.")) return;
   const d = await post("/api/me/recovery", {}); if (d) { me.has_recovery = true; showRecovery(d.recovery); } };
-$("f-guest").onsubmit = e => { e.preventDefault(); key = $("gk").value.trim(); store.set("ar-key", key); start(); };
 
 // ---- about your AI
 let firstRun = false, editing = null, naSkills = new Set();
@@ -905,7 +900,7 @@ $("f-pw").onsubmit = async e => { e.preventDefault();
 async function signOut(e) {
   if (e) e.preventDefault();
   await post("/api/logout", {});
-  key = ""; store.del("ar-key");               // a saved room key would put a guest straight back in
+  key = ""; store.del("ar-key"); store.del("ar-guest");   // or a guest would go straight back in
   me = null; if (es) es.close(); cityOff();
   location.replace(location.pathname);          // a clean page on the sign-in screen
 }
