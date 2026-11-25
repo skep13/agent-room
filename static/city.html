@@ -238,6 +238,39 @@ function flame(a, b, t, seed, s = 1) {
 let B = new Map(), WATER = new Set();
 const has = (x, y, t) => { const v = B.get(x + "," + y); return v && v.t === t && v.s !== "ruin"; };
 function blackout() { return (city?.active || []).some(a => a.type === "gridfailure") || (city && city.stats.power_ratio < .5); }
+// higher-level buildings: town (level 2) and modern city (level 3)
+function tower(x, y, w, h, c, glass, seed, rows, crown) {
+  const o = (1 - w) / 2;
+  box(x + o, y + o, w, w, 0, h, c);
+  windows(x + o, y + o, w, w, 3, h - 6, rows, 3, seed, glass);
+  box(x + o + .03, y + o + .03, w - .06, w - .06, h, 2.5, shade(c, -.22));
+  if (crown) { box(x + .44, y + .44, .12, .12, h + 2.5, 8, "#9aa3ab"); const [a, b] = P(x + .5, y + .5, h + 10.5); g.strokeStyle = "#cfd6dc"; g.lineWidth = 1; g.beginPath(); g.moveTo(a, b); g.lineTo(a, b - 14); g.stroke(); }
+}
+const UP = {
+  house(x, y, t, sd, lv) {
+    if (lv === 2) {          // terrace of town houses
+      const c = ["#d9c3a5", "#e6d2b2", "#c9b8a2"][sd % 3];
+      box(x + .14, y + .18, .72, .64, 0, 26, c);
+      windows(x + .14, y + .18, .72, .64, 3, 20, 2, 3, "th" + x + y, "#38556e");
+      gable(x + .1, y + .14, .8, .72, 26, 9, ["#8f3b2b", "#3e5a74", "#5b4636"][sd % 3], c);
+    } else tower(x, y, .66, 74, ["#e9ecef", "#d4dce3", "#f2efe9"][sd % 3], "#5b8fb8", "ht" + x + y, 9, false);
+  },
+  flats(x, y, t, sd, lv) {
+    if (lv === 2) tower(x, y, .74, 96, ["#c9b8a2", "#a9b7bf", "#d8cfc0"][sd % 3], "#30506b", "fl" + x + y, 12, false);
+    else tower(x, y, .72, 150, ["#c7d3dd", "#b5c4cf", "#dfe6ec"][sd % 3], "#3f7fb0", "fs" + x + y, 18, true);
+  },
+  market(x, y, t, sd, lv) {
+    if (lv === 2) {          // shopping arcade
+      box(x + .1, y + .1, .8, .8, 0, 22, "#e8e1d4");
+      windows(x + .1, y + .1, .8, .8, 2, 18, 2, 4, "ma" + x + y, "#4a7fa6");
+      box(x + .1, y + .1, .8, .8, 22, 3, "#c0392b");
+    } else tower(x, y, .7, 118, "#9fb1c0", "#2f6d9a", "of" + x + y, 15, true);
+  },
+};
+function pips(x, y, lv) {     // level marker for other buildings
+  const [a, b] = P(x + .5, y + .5, 40);
+  for (let i = 0; i < lv - 1; i++) { g.fillStyle = "#ffd60a"; g.beginPath(); g.arc(a - (lv - 2) * 4 + i * 8, b, 3, 0, 7); g.fill(); g.strokeStyle = "rgba(0,0,0,.35)"; g.lineWidth = 1; g.stroke(); }
+}
 const ART = {
   house(x, y, t, sd) {
     const roof = ["#b5462f", "#8f3b2b", "#3e5a74", "#5b4636"][sd % 4], wall = ["#efe6d3", "#e6d2b2", "#f3efe7", "#d9c3a5"][(sd >>> 3) % 4];
@@ -551,7 +584,9 @@ function frame(t) {
       if (z) { g.save(); g.translate(0, -z); }
       if (v.s === "ruin") rubble(x, y, k);
       else {
-        if (ART[v.t]) ART[v.t](x, y, t, hash(k));
+        const lv = v.lv || 1;
+        if (lv > 1 && UP[v.t]) UP[v.t](x, y, t, hash(k), lv);
+        else { if (ART[v.t]) ART[v.t](x, y, t, hash(k)); if (lv > 1) pips(x, y, lv); }
         if (v.s === "damaged") {
           const [a, b] = P(x + .55, y + .45, 18); smoke(a, b, t, "d" + k, 3, "rgba(60,55,50,");
           g.setLineDash([3, 2]); poly(tileQ(x, y, 1, .03), null, "#ffd60a", 2); g.setLineDash([]);
@@ -638,7 +673,7 @@ function renderHUD() {
       ses.members.map(n => `<span class="chip ${ses.waiting.includes(n) ? "wait" : "done"}"><span class="d" style="background:${esc(col[n] || "#888")}"></span>${esc(n)}</span>`).join("") + "</div>";
     sb.hidden = false;
   } else sb.hidden = true;
-  $("clock").textContent = "Day " + city.day;
+  $("clock").textContent = "Day " + city.day + (city.stats?.era_name ? " · " + city.stats.era_name : "");
 }
 function spark(vals, color, w = 150, h = 34) {
   if (vals.length < 2) return `<svg width="${w}" height="${h}"></svg>`;

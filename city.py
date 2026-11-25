@@ -55,6 +55,13 @@ B = {
     "shelter":    dict(n="Shelter", c=250, u=2, shelter=50, ch="X"),
     "warehouse":  dict(n="Warehouse", c=160, u=2, store_f=500, store_w=300, jobs=4, ch="G"),
 }
+# ---- growth: buildings go up a level (1-3) once the city reaches the era that allows it
+UPGRADABLE = {"house", "flats", "farm", "fishery", "market", "factory", "school", "clinic", "hospital", "reservoir",
+              "solar", "wind", "coal", "warehouse", "shelter", "firestation"}
+LV_OUT = {1: 1.0, 2: 1.8, 3: 2.8}      # output multiplier per level
+LV_UP = {1: 1.0, 2: 1.5, 3: 2.2}       # upkeep multiplier per level
+ERAS = {1: "Village", 2: "Town", 3: "Modern city"}
+
 ALIASES = {"fire station": "firestation", "fire": "firestation", "power plant": "coal", "coal plant": "coal",
            "coal power plant": "coal", "solar farm": "solar", "solar panels": "solar", "wind turbine": "wind",
            "wind turbines": "wind", "windfarm": "wind", "wind farm": "wind", "sea wall": "seawall", "levee": "seawall",
@@ -90,7 +97,7 @@ NICE = {"flood": "Flood", "earthquake": "Earthquake", "wildfire": "Wildfire", "d
         "pandemic": "Pandemic", "gridfailure": "Grid failure", "crash": "Economic crash", "meteor": "Meteor strike",
         "nuclearwinter": "Nuclear winter", "outbreak": "Outbreak"}
 
-ACTION_RE = re.compile(r"\[\s*(build|demolish|repair|tax|policy|stockpile)\b([^\]]*)\](?:[ \t]*(?:::|-|—|:)[ \t]*([^\n\[]*))?", re.I)
+ACTION_RE = re.compile(r"\[\s*(build|upgrade|demolish|repair|tax|policy|stockpile)\b([^\]]*)\](?:[ \t]*(?:::|-|—|:)[ \t]*([^\n\[]*))?", re.I)
 YES_RE = re.compile(r"\[\s*yes\s*:?\s*([\d,\s and]+)\]", re.I)
 NO_RE = re.compile(r"\[\s*no\s*:?\s*([\d,\s and]+)\]", re.I)
 
@@ -105,6 +112,7 @@ PROPOSE = (
     "Exactly like:\n"
     "[build farm 12,9] :: we're short on food\n"
     "[build road 11,9] :: connect the new farm\n"
+    "[upgrade 10,11] :: more homes without new land\n"
     "[tax 12] :: we need money for a hospital\n"
     "[policy drills on] :: the flood is coming\n"
     "[stockpile food 150] :: stores for the drought\n"
@@ -289,6 +297,40 @@ class City:
         b = self.st["b"]
         return any((b.get(f"{x + dx},{y + dy}") or {}).get("t") == "road" for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
 
+    def era(self, pop=None, counts=None, ratio=None):
+        """(level, name, what the next era needs). Higher eras let buildings go up a level."""
+        st = self.st
+        if counts is None:
+            counts = {}
+            for _, _, v in self.blds():
+                counts[v["t"]] = counts.get(v["t"], 0) + 1
+        pop = st["pop"] if pop is None else pop
+        ratio = 1 if ratio is None else ratio
+        need2 = [w for w, ok in (("120 people", pop >= 120), ("a school", counts.get("school")),
+                                 ("a clinic or hospital", counts.get("clinic") or counts.get("hospital")),
+                                 ("a market", counts.get("market"))) if not ok]
+        if need2:
+            return 1, ERAS[1], "Town needs " + ", ".join(need2)
+        lv2 = sum(1 for _, _, v in self.blds() if v.get("lv", 1) >= 2)
+        need3 = [w for w, ok in (("350 people", pop >= 350), ("a hospital", counts.get("hospital")),
+                                 ("a factory", counts.get("factory")), ("full power", ratio >= 1),
+                                 ("6 town-level buildings", lv2 >= 6), ("happiness 55+", st["happy"] >= 55)) if not ok]
+        if need3:
+            return 2, ERAS[2], "Modern city needs " + ", ".join(need3)
+        return 3, ERAS[3], "top era reached"
+
+    def grow(self, rng):
+        """Happy residents and busy shops rebuild on their own once the era allows it."""
+        lvl = self.era()[0]
+        if self.st["happy"] < 55 or lvl < 2:
+            return []
+        up = []
+        for x, y, v in list(self.blds(ok_only=True)):
+            if v["t"] in ("house", "flats", "market") and v.get("lv", 1) < lvl and self.by_road(x, y) and rng.random() < .1:
+                v["lv"] = v.get("lv", 1) + 1
+                up.append(f"{B[v['t']]['n'].lower()} at {x},{y}")
+        return up
+
     def road_budget(self):
         """(roads built, roads allowed): roads are only worth it when they serve buildings."""
         roads = sum(1 for _ in self.blds("road"))
@@ -344,10 +386,11 @@ class City:
         for x, y, v in self.blds():
             d = B[v["t"]]
             counts[v["t"]] = counts.get(v["t"], 0) + 1
-            eff = 1.0 if v["s"] == "ok" else .5
+            lv = v.get("lv", 1)
+            eff = (1.0 if v["s"] == "ok" else .5) * LV_OUT[lv]
             if v["t"] != "road" and not self.by_road(x, y):
                 eff *= .5
-            sums["upkeep"] += d["u"]
+            sums["upkeep"] += d["u"] * LV_UP[lv]
             sums["use"] += d.get("pw", 0) * eff
             pm = {"coal": m["coal"], "solar": m["solar"], "wind": m["wind"]}.get(v["t"], 1)
             sums["power"] += d.get("power", 0) * eff * pm
@@ -386,6 +429,7 @@ class City:
             "income": round(income), "costs": round(costs), "tax": st["tax"], "happy": round(st["happy"]),
             "buildings": counts, "deaths": st["deaths"],
         }
+        out["era"], out["era_name"], out["era_next"] = self.era(pop, counts, ratio)
         st["last"] = out
         return out
 
@@ -689,7 +733,7 @@ class City:
             t = m.group(1).strip().strip(":")
             t = ALIASES.get(t, t.replace(" ", "").replace("-", ""))
             return {"verb": "build", "t": t, "x": int(m.group(2)), "y": int(m.group(3))} if t in B else None
-        if verb in ("demolish", "repair"):
+        if verb in ("demolish", "repair", "upgrade"):
             m = re.search(r"(\d+)\s*[, ]\s*(\d+)", args)
             return {"verb": verb, "x": int(m.group(1)), "y": int(m.group(2))} if m else None
         if verb == "tax":
@@ -712,7 +756,7 @@ class City:
     def describe(a):
         if a["verb"] == "build":
             return f"build {a['t']} {a['x']},{a['y']}"
-        if a["verb"] in ("demolish", "repair"):
+        if a["verb"] in ("demolish", "repair", "upgrade"):
             return f"{a['verb']} {a['x']},{a['y']}"
         if a["verb"] == "tax":
             return f"tax {a['n']}"
@@ -727,6 +771,9 @@ class City:
             return B[a["t"]]["c"] + extra
         if a["verb"] == "demolish":
             return 10
+        if a["verb"] == "upgrade":
+            v = self.st["b"].get(f"{a['x']},{a['y']}")
+            return round(B[v["t"]]["c"] * .7 * v.get("lv", 1)) if v else 0
         if a["verb"] == "repair":
             v = self.st["b"].get(f"{a['x']},{a['y']}")
             return round(B[v["t"]]["c"] * .4) if v else 0
@@ -737,7 +784,7 @@ class City:
     def check(self, a):
         """None if the action can be done right now, or the reason it can't."""
         st = self.st
-        if a["verb"] in ("build", "demolish", "repair"):
+        if a["verb"] in ("build", "demolish", "repair", "upgrade"):
             x, y = a["x"], a["y"]
             if not (0 <= x < N and 0 <= y < N):
                 return "that's off the map"
@@ -764,6 +811,16 @@ class City:
             elif a["verb"] == "demolish":
                 if not v:
                     return "there's nothing there"
+            elif a["verb"] == "upgrade":
+                if not v or v["s"] != "ok":
+                    return "there's no working building there"
+                if v["t"] not in UPGRADABLE:
+                    return f"a {B[v['t']]['n'].lower()} can't be upgraded"
+                lvl, name, nxt = self.era()
+                if v.get("lv", 1) >= lvl:
+                    return f"it's already level {v.get('lv', 1)}, the most a {name.lower()} allows ({nxt})"
+                if not self.by_road(x, y):
+                    return "it needs to touch a road first"
             elif not v or v["s"] != "damaged":
                 return "there's nothing damaged there"
         if a["verb"] == "tax" and not 0 <= a["n"] <= 30:
@@ -795,6 +852,10 @@ class City:
         if a["verb"] == "demolish":
             st["b"].pop(f"{a['x']},{a['y']}", None)
             return True, "cleared"
+        if a["verb"] == "upgrade":
+            v = st["b"][f"{a['x']},{a['y']}"]
+            v["lv"] = v.get("lv", 1) + 1
+            return True, f"now level {v['lv']} for {c}"
         if a["verb"] == "repair":
             st["b"][f"{a['x']},{a['y']}"]["s"] = "ok"
             return True, f"repaired for {c}"
@@ -836,6 +897,14 @@ class City:
             if sc["status"] == "scheduled":
                 alerts.append(f"FORECAST: {NICE[sc['type']]} (severity {sc['severity']} of 5) expected in "
                               f"{sc['due'] - st['day']} day(s). {SCENARIOS[sc['type']]}")
+        lines.append(f"Era: {s['era_name']} (buildings can reach level {s['era']}). {s['era_next']}. "
+                     "Upgrading a building multiplies what it gives (level 2 x1.8, level 3 x2.8) and its upkeep "
+                     "(x1.5, x2.2); it costs 70% of its build price times its current level. Happy residents also "
+                     "rebuild homes and shops on their own once the era allows.")
+        ups = [f"{B[v['t']]['n'].lower()} {x},{y} L{v.get('lv', 1)}" for x, y, v in self.blds(ok_only=True)
+               if v["t"] in UPGRADABLE and v.get("lv", 1) < s["era"]]
+        if ups:
+            lines.append("Can be upgraded now: " + "; ".join(ups[:14]))
         lines.append("Alerts: " + (" ".join(alerts) if alerts else "none."))
         recent = self.q("SELECT text FROM events WHERE run=? AND day>=? AND kind IN ('decision','disaster','disaster_over',"
                         "'recovered','day') ORDER BY id DESC LIMIT 8", (st["run"], st["day"] - 1)).fetchall()
@@ -990,8 +1059,15 @@ class City:
     def end_day(self):
         st = self.st
         notes = []
+        before = self.era()[0]
         _, more = self.simulate_day()
         notes += more
+        up = self.grow(random.Random(st["seed"] * 104729 + st["day"]))
+        if up:
+            notes.append("residents rebuilt: " + ", ".join(up[:6]) + (f" and {len(up) - 6} more" if len(up) > 6 else ""))
+        after = self.era()
+        if after[0] > before:
+            self.event("era", f"The city has grown into a {after[1].lower()}! Buildings can now go up to level {after[0]}.")
         self.ongoing(notes)
         st["day"] += 1
         for sc in self.q("SELECT * FROM scenarios WHERE run=? AND status='scheduled' AND due<=? ORDER BY due, id",
@@ -1076,7 +1152,7 @@ class City:
             "running": self.running, "paused": self.paused_reason, "council": True,
             "run": {"id": st["run"], "name": st["name"], "seed": st["seed"]}, "day": st["day"], "size": N,
             "terrain": st["terrain"],
-            "buildings": [{"t": v["t"], "x": int(k.split(",")[0]), "y": int(k.split(",")[1]), "s": v["s"]}
+            "buildings": [{"t": v["t"], "x": int(k.split(",")[0]), "y": int(k.split(",")[1]), "s": v["s"], "lv": v.get("lv", 1)}
                           for k, v in st["b"].items()],
             "marks": st["marks"], "stats": s, "tax": st["tax"], "policies": st["policies"],
             "active": [{"type": a["type"], "name": NICE[a["type"]], "severity": a["severity"], "left": a["left"]}
