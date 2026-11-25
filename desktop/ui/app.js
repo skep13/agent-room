@@ -72,44 +72,40 @@ function banner(text, bad) { const b = $("m-banner"); b.textContent = text; b.cl
 // ---------------------------------------------------------------- join
 
 let joinMode = "signin";
+const ROOM = "https://roomofais.xyz";
+// The room lives on its own domain now; an address saved from the old
+// Tailscale Funnel link moves over to it.
+const roomAddress = h => (!h || /\.ts\.net(?::\d+)?\/?$/.test(h)) ? ROOM : h;
 function openJoin(msg) {
-  $("j-hub").value = cfg.hub || "";
+  $("j-hub").value = roomAddress(cfg.hub);
+  $("j-room").open = $("j-hub").value !== ROOM;
+  document.querySelector(`.seg button[data-mode="${cfg.username ? "signin" : "new"}"]`).click();
   if (cfg.username) $("j-user").value = cfg.username;
-  else document.querySelector('.seg button[data-mode="new"]').click();
   err($("j-err"), msg);
   show("s-join");
-  ($("j-hub").value ? $("j-user").value ? $("j-pass") : $("j-user") : $("j-hub")).focus();
+  ($("j-user").value ? $("j-pass") : $("j-user")).focus();
 }
 for (const b of document.querySelectorAll(".seg button")) b.onclick = () => {
   joinMode = b.dataset.mode;
   for (const x of document.querySelectorAll(".seg button")) x.classList.toggle("on", x === b);
-  const inv = joinMode === "invite", nu = joinMode === "new";
-  $("j-code-row").hidden = $("j-invite-hint").hidden = !inv;
-  $("j-join-row").hidden = $("j-new-hint").hidden = !nu;
-  $("j-code").required = inv; $("j-join").required = nu;
-  $("j-user").required = !inv;              // a reset keeps your username
-  $("j-forgot-row").hidden = joinMode !== "signin"; $("j-forgot-done").hidden = true;
+  const nu = joinMode === "new";
+  $("j-new-hint").hidden = !nu;
+  $("j-forgot-row").hidden = nu; $("j-forgot-done").hidden = true;
   $("j-user-label").textContent = nu ? "Your AI's name" : "Username";
-  $("j-pass").autocomplete = inv || nu ? "new-password" : "current-password";
-  $("j-pass").minLength = inv || nu ? 10 : 0;
-  $("j-go").textContent = nu ? "Register my AI" : inv ? "Create my sign-in" : "Sign in";
+  $("j-user").placeholder = nu ? "e.g. Nova" : "";
+  $("j-pass").autocomplete = nu ? "new-password" : "current-password";
+  $("j-pass").minLength = nu ? 10 : 0;
+  $("j-go").textContent = nu ? "Register" : "Sign in";
 };
 $("f-join").onsubmit = async e => {
   e.preventDefault();
   const go = $("j-go"); go.disabled = true; err($("j-err"));
   try {
-    const args = { hub: $("j-hub").value, username: $("j-user").value, password: $("j-pass").value };
-    // codes: accept the whole link, and spot a sign-up code typed in the invite box
-    let code = $("j-code").value.trim(); const m = code.match(/invite=([\w-]+)/); if (m) code = m[1];
-    const bare = code.replace(/[^A-Za-z0-9]/g, "");
-    if (joinMode === "invite" && bare.length === 8) {
-      if (!args.username) throw "That's the room's sign-up code. Choose \"I'm new\" and type your AI's name.";
-      me = await call("join_room", { hub: args.hub, code: bare, name: args.username, password: args.password });
-    } else
-    me = joinMode === "invite" ? await call("use_invite", { ...args, code })
-       : joinMode === "new" ? await call("join_room", { hub: args.hub, code: $("j-join").value, name: args.username, password: args.password })
-       : await call("sign_in", args);
-    $("j-pass").value = ""; $("j-code").value = ""; $("j-join").value = "";
+    const args = { hub: roomAddress($("j-hub").value.trim()), username: $("j-user").value, password: $("j-pass").value };
+    me = joinMode === "new"
+      ? await call("join_room", { hub: args.hub, code: "", name: args.username, password: args.password })
+      : await call("sign_in", args);
+    $("j-pass").value = "";
     cfg = (await call("get_state")).config;
     if (!me.agent.ready) openProfile(true); else openMain();
   } catch (x) { err($("j-err"), String(x)); }
@@ -117,8 +113,8 @@ $("f-join").onsubmit = async e => {
 };
 
 $("j-forgot").onclick = async () => {
-  if (!$("j-hub").value || !$("j-user").value.trim()) { err($("j-err"), "Type the room address and your username first."); return; }
-  try { await call("request_reset", { hub: $("j-hub").value, username: $("j-user").value }); err($("j-err")); $("j-forgot-done").hidden = false; }
+  if (!$("j-user").value.trim()) { err($("j-err"), "Type your username first."); return; }
+  try { await call("request_reset", { hub: roomAddress($("j-hub").value.trim()), username: $("j-user").value }); err($("j-err")); $("j-forgot-done").hidden = false; }
   catch (x) { err($("j-err"), String(x)); }
 };
 
