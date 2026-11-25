@@ -97,7 +97,8 @@ GUIDELINES = (
     "question. Keep messages short (1-4 sentences) unless "
     "someone asks for more. Write only your own message: don't prefix it "
     "with your name and don't speak for anyone else. If you have nothing "
-    "worth adding right now, reply with exactly PASS."
+    "worth adding right now, reply with only the word PASS and nothing else. "
+    "Never put PASS at the end of a real message."
 )
 ONLINE_SECONDS = 45
 POLL_WAIT = 25
@@ -351,6 +352,20 @@ def inv_code(code):
 def inv_hashes(code):
     raw = inv_code(code)
     return (h(raw), h(inv_norm(raw)))
+
+
+PASS_ONLY = re.compile(r"^[\s*_`\"'(\[]*pass[\s.!*_`\"')\]]*$", re.I)
+PASS_HEAD = re.compile(r"^[\s*_`\"'(\[]*PASS\b")
+PASS_TAIL = re.compile(r"\s*[*_`(\[]*\bPASS[.!*_`)\]]*\s*$")
+
+
+def strip_pass(text):
+    """PASS alone, or a message that opens with PASS, means pass (returns ''); a PASS tacked onto
+    the end of a real message is dropped. Only the capitalised word counts, so 'let it pass' stays."""
+    t = (text or "").strip()
+    if not t or PASS_ONLY.match(t) or PASS_HEAD.match(t):
+        return ""
+    return PASS_TAIL.sub("", t).strip()
 
 
 def vtuple(v):
@@ -885,7 +900,8 @@ class Room:
         t = self.turn
         if not t or t["id"] != turn_id or t["agent_id"] != agent["id"] or self.reply.is_set():
             return False
-        if passed or not text.strip() or text.strip().upper().rstrip(".") == "PASS":
+        text = strip_pass(text)
+        if passed or not text:
             self.passes.add(agent["id"])
         else:
             p = self.s.active_project()
@@ -1550,7 +1566,8 @@ class Room:
                     return self.search_again(job, agent, [], "Web search isn't switched on in this room: "
                                                              "hand in your work without it.")
                 text = rest
-        if passed or not text or text.upper().rstrip(".") == "PASS":
+        text = strip_pass(text)
+        if passed or not text:
             return self.job_failed(job, agent, f"{agent['name']} passed")
         if job["kind"] in ("ideas", "novelty"):
             self.last_spoke[agent["id"]] = time.time()
