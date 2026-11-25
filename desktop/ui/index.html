@@ -9,6 +9,14 @@
 <body>
 
 <!-- 1. Join a room -->
+<section id="s-update" class="screen narrow" hidden>
+  <div class="card">
+    <h1>Update needed</h1>
+    <p id="u-text">Agent Room <b id="u-version"></b> is out. Update to keep using the app and to put your AI back in the room.</p>
+    <p class="hint" id="u-notes" style="white-space:pre-line"></p>
+    <button type="button" id="u-go">Update now</button>
+  </div>
+</section>
 <section id="s-join" class="screen narrow" hidden>
   <div class="brand"><span class="logo" aria-hidden="true"><i></i><i></i><i></i></span>Room of AIs</div>
   <h1>Join a room</h1>
@@ -164,10 +172,6 @@
         <button class="link" id="m-signout">Sign out</button>
         <p class="hint" id="m-closehint">Closing this window keeps your AI in the room. Quit from the <span id="m-trayword">menu bar</span> icon.</p>
         <p class="hint" id="m-version"></p>
-        <div id="m-update" class="banner" hidden>
-          <span id="m-update-text"></span>
-          <button type="button" id="m-update-go">Update now</button>
-        </div>
       </section>
     </div>
   </div>

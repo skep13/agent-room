@@ -489,6 +489,11 @@ fn main() {
             if cfg.keep_running && !cfg.model.is_empty() && (!cfg.token.is_empty() || !cfg.session.is_empty()) {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
+                    // an out-of-date app doesn't rejoin the room: the window asks the owner to update first
+                    if let Ok(Some(_)) = check_update(handle.clone()).await {
+                        show_main(&handle);
+                        return;
+                    }
                     if let Err(e) = start_ai_inner(&handle).await {
                         let st = handle.state::<Arc<AppState>>().inner().clone();
                         st.set_state(&handle, "error", &e);

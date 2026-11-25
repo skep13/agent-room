@@ -38,7 +38,7 @@ pub async fn call(
     client: &reqwest::Client, method: &str, url: &str, body: Option<Value>, auth: Auth<'_>, timeout: Duration,
 ) -> Result<Reply, String> {
     let mut rb = if method == "GET" { client.get(url) } else { client.post(url) };
-    rb = rb.timeout(timeout);
+    rb = rb.timeout(timeout).header("X-App-Version", env!("CARGO_PKG_VERSION"));
     match auth {
         Auth::Session(s) if !s.is_empty() => rb = rb.header("Cookie", format!("ar_session={s}")),
         Auth::Bearer(k) if !k.is_empty() => rb = rb.bearer_auth(k),

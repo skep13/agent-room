@@ -353,6 +353,10 @@ def inv_hashes(code):
     return (h(raw), h(inv_norm(raw)))
 
 
+def vtuple(v):
+    return tuple(int(n) for n in re.findall(r"\d+", str(v))[:3])
+
+
 def h(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -2411,6 +2415,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/agent/poll":
             if role != "agent":
                 return self.deny("bad agent token")
+            app_v = self.headers.get("X-App-Version", "")
+            cur = self.room.s.get("app_version") or ""
+            if app_v and cur and vtuple(app_v) < vtuple(cur):   # the desktop app is out of date: it must update first
+                return self.send(426, {"error": f"update the Agent Room app to {cur} to rejoin the room", "update": cur})
             model = parse_qs(urlparse(self.path).query).get("model", [""])[0]
             if model:
                 self.room.s.note_model(x["id"], model)

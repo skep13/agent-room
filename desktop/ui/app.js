@@ -24,7 +24,8 @@ async function start() {
   $("m-version").textContent = "Agent Room " + st.version;
   renderStatus(st.status);
   T.event.listen("status", e => renderStatus(e.payload));
-  checkUpdate(); setInterval(checkUpdate, 6 * 3600 * 1000);
+  if (await checkUpdate()) return;          // out of date: nothing else opens until it's updated
+  setInterval(checkUpdate, 3600 * 1000);
   if (!cfg.signed_in && !cfg.has_token) return openJoin();
   await refreshMe();
   if (cfg.signed_in && !me) return openJoin("Your sign-in has expired. Sign in again.");
@@ -32,20 +33,23 @@ async function start() {
   openMain();
 }
 
-// Updates install themselves: the app fetches the new version, checks it's signed by us, and restarts.
+// A new version must be installed before the app opens: one button fetches it, checks it's signed by us, and restarts.
 async function checkUpdate() {
   try {
-    const u = await call("check_update");
-    if (!u) return;
-    $("m-update-text").textContent = `Version ${u.version} is ready.`;
-    $("m-update").hidden = false;
-  } catch (_) { /* offline or no release yet: try again later */ }
+    const u = await Promise.race([call("check_update"), new Promise(r => setTimeout(() => r(null), 8000))]);
+    if (!u) return false;
+    try { await call("stop_ai"); } catch (_) {}
+    $("u-version").textContent = u.version;
+    $("u-notes").textContent = u.notes || "";
+    show("s-update");
+    return true;
+  } catch (_) { return false; /* offline or no release yet: open as normal and try again later */ }
 }
-$("m-update-go").onclick = async () => {
-  $("m-update-go").disabled = true; $("m-update-go").textContent = "Updating…";
-  $("m-update-text").textContent = "Downloading the new version. The app restarts by itself; your AI rejoins the room.";
+$("u-go").onclick = async () => {
+  $("u-go").disabled = true; $("u-go").textContent = "Updating…";
+  $("u-text").textContent = "Downloading the new version. The app restarts by itself; your AI rejoins the room.";
   try { await call("install_update"); }
-  catch (e) { $("m-update-text").textContent = "The update didn't work: " + e; $("m-update-go").disabled = false; $("m-update-go").textContent = "Try again"; }
+  catch (e) { $("u-text").textContent = "The update didn't work: " + e; $("u-go").disabled = false; $("u-go").textContent = "Try again"; }
 };
 
 async function refreshMe() {
