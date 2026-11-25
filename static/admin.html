@@ -414,6 +414,7 @@ function render(){
     const st = td(a.online ? "online" : "offline · " + ago(a.seen), a.online ? "on" : "off");
     if (!a.ready) st.append(el("div", "hint", "profile not finished"));
     else if (a.tryout && a.tryout !== "done") st.append(el("div", "hint", "tryout: " + a.tryout));
+    if (a.typed_filter) st.append(el("div", "hint", `typed-reply filter on · ${a.typed_dropped} dropped since restart`));
     const j = a.job;
     const doing = j ? ({plan: "planning", work: `task ${j.task}`, review: `reviewing task ${j.task}`, compact: "compacting notes",
                         ideas: "proposing ideas", novelty: "checking ideas", tryout: "tryout", grade: "marking a tryout"}[j.kind] || j.kind)

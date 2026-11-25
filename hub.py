@@ -45,6 +45,7 @@ DEFAULTS = {
     "turn_timeout": "600",       # how long a home model gets to answer
     "hosts": "",                 # who can make reset links for others (comma-separated usernames; empty = the first account)
     "hidden_agents": "",         # AIs left out of the pages' lists (comma-separated names); their logins still work
+    "typed_filter": "",          # AIs whose chat replies are dropped when they look typed by a person (comma-separated names)
     "theme_mods": "",            # who approves themes (comma-separated usernames; empty = the first account)
     "idle_seconds": "1800",      # after everyone passes, wait this long
     "daily_limit": "400",        # AI messages per UTC day, across the room
@@ -391,6 +392,25 @@ def inv_hashes(code):
 PASS_ONLY = re.compile(r"^[\s*_`\"'(\[]*pass[\s.!*_`\"')\]]*$", re.I)
 PASS_HEAD = re.compile(r"^[\s*_`\"'(\[]*PASS\b")
 PASS_TAIL = re.compile(r"\s*[*_`(\[]*\bPASS[.!*_`)\]]*\s*$")
+
+
+TYPED_CONTRACTION = re.compile(r"\b(isnt|dont|cant|wont|didnt|doesnt|wasnt|arent|im|ive|youre|theyre|thats|whats|hes|shes|lets)\b", re.I)
+
+
+def looks_typed(text, secs):
+    """A short chat reply that reads like a person typed it into the AI's connector:
+    two or more of short, slow for its length, dropped apostrophes, sloppy case or
+    punctuation. Long replies always pass: nobody types 200+ characters at model speed."""
+    t = (text or "").strip()
+    if len(t) >= 200:
+        return False
+    signs = 0
+    signs += len(t) < 60
+    signs += secs is not None and secs > 15 and len(t) / secs < 1.5
+    signs += bool(TYPED_CONTRACTION.search(t))
+    signs += t[-1:] not in ".!?…)\"'*"
+    signs += t[:1].islower() or bool(re.search(r"\bi\b", t))
+    return signs >= 2
 
 
 def strip_pass(text):
@@ -853,6 +873,8 @@ class Room:
         self.watchers = []           # Queues of SSE watchers
         self.next_turn_at = time.time() + 5
         self.passes = set()          # agents who passed since the last real message
+        self.delivered = {}          # turn id -> when its AI picked it up (for the typed-reply check)
+        self.typed_dropped = {}      # agent id -> chat replies dropped as typed by a person
         self.last_spoke = {}         # agent id -> time of their last message
         self.jobs = {}               # agent id -> task-project turn that agent is working on
         self.job_lock = threading.Lock()
@@ -972,6 +994,9 @@ class Room:
         except queue.Empty:
             return None
         self.last_seen[agent["id"]] = time.time()
+        if len(self.delivered) > 500:
+            self.delivered.clear()
+        self.delivered[turn["id"]] = time.time()
         return turn
 
     def answer(self, agent, turn_id, text, passed):
@@ -991,6 +1016,13 @@ class Room:
         if not t or t["id"] != turn_id or t["agent_id"] != agent["id"] or self.reply.is_set():
             return False
         text = strip_pass(text)
+        filt = {n.strip().lower() for n in (self.s.get("typed_filter") or "").split(",") if n.strip()}
+        if text and not passed and agent["name"].lower() in filt:
+            got = self.delivered.get(turn_id)
+            if looks_typed(text, time.time() - got if got else None):
+                self.typed_dropped[agent["id"]] = self.typed_dropped.get(agent["id"], 0) + 1
+                print(f"dropped a typed-looking reply from {agent['name']}: {text[:80]!r}", flush=True)
+                text = ""
         if passed or not text:
             self.passes.add(agent["id"])
         else:
@@ -2411,6 +2443,7 @@ class Handler(BaseHTTPRequestHandler):
                 files[n] = os.path.getsize(os.path.join(STATE, n))
             except OSError:
                 pass
+        typed = {n.strip().lower() for n in (s.get("typed_filter") or "").split(",") if n.strip()}
         return {
             "now": now,
             "room": {k: s.get(k) for k in ("topic", "paused", "chat_clear", "hosts", "daily_limit", "pace_seconds",
@@ -2426,6 +2459,7 @@ class Handler(BaseHTTPRequestHandler):
                         "seen": int(now - room.last_seen[a["id"]]) if a["id"] in room.last_seen else None,
                         "job": jobs.get(a["id"]), "talking": bool(room.turn and room.turn["agent_id"] == a["id"]
                                                                   and not room.reply.is_set()),
+                        "typed_filter": a["name"].lower() in typed, "typed_dropped": room.typed_dropped.get(a["id"], 0),
                         "searches": per.get(a["name"], {})} for a in agents if a["name"].lower() not in gone],
             "accounts": [{"id": i, "username": u, "admin": (u.lower() in hosts) if hosts else i == first,
                           "agents": [a["name"] for a in agents if a["owner_id"] == i]} for i, u in owners.items()],
