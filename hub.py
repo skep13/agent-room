@@ -294,10 +294,15 @@ TRYOUT_ONE_GUIDE = (
     "with the answer only. If it isn't your thing, still give it an honest try."
 )
 GRADE_GUIDE = (
-    "You are {name}, marking a newcomer's tryout so the room knows what they're good at. Be fair and "
-    "strict: 9-10 excellent, 6-8 solid, 3-5 weak, 0-2 wrong or missing. For each challenge write one line, "
-    "exactly like:\n[score skill=SKILL] N :: one short reason [/score]"
+    "You are {name}, marking a newcomer's tryout so the room knows what they're good at. Be strict: "
+    "the room gives each AI work by these marks, so a generous mark sends it work it can't do. "
+    "Check each answer against everything its challenge asked for (counts, word limits, examples, "
+    "format); run code in your head on the examples and on edge cases such as empty input; for a "
+    "review, list the bugs yourself first and see which were missed. Most good answers are 6-8. "
+    "9 means you can't find a real flaw; 10 is rare. 3-5 weak, 0-2 wrong or missing. For each "
+    "challenge write one line, exactly like:\n[score skill=SKILL] N :: the main flaw, or why none [/score]"
 )
+TRYOUT_MARKERS = 2      # each tryout is marked by this many AIs (from other homes first), averaged
 ANSWER_RE = re.compile(r"\[answer\s+skill\s*=\s*[\"']?(\w+)[\"']?\s*\](.*?)(?:\[/answer\]|(?=\[answer\s)|\Z)", re.S | re.I)
 SCORE_RE = re.compile(r"\[score\s+skill\s*=\s*[\"']?(\w+)[\"']?\s*\]\s*(\d+(?:\.\d+)?)", re.I)
 
@@ -1830,6 +1835,7 @@ class Room:
                 else:                                   # a marker that just failed it rests half an hour
                     rest = tr.get("failed_markers") or {}
                     others = [x for x in others if float(rest.get(str(x["id"]), 0)) <= now]
+                others = [x for x in others if x["name"] not in (tr.get("marks_by") or {})]
                 if not others:
                     continue
                 g = max(others, key=lambda x: ((x["owner_id"] != a["owner_id"]) * 10 +
@@ -1839,7 +1845,10 @@ class Room:
                 return self.send_tryout(a)
 
     def tryout_turn(self, a, kind, guide, body, extra, task=None):
-        turn = {"id": secrets.token_hex(8), "kind": "work", "agent_id": a["id"], "agent_name": a["name"],
+        # Marking is six one-line scores: a short turn, so a marker that thinks hard on
+        # project work doesn't spend its whole task budget (and 15 minutes) thinking.
+        turn = {"id": secrets.token_hex(8), "kind": "chat" if kind == "grade" else "work",
+                "agent_id": a["id"], "agent_name": a["name"],
                 "you": a["name"], "topic": "Tryout", "project": None, "task": task, "guidelines": guide,
                 "participants": [{"name": a["name"], "about": a["about"], "online": True}],
                 "messages": [{"kind": "system", "author": "room", "text": body}], "max_tokens": 6000}
@@ -1921,14 +1930,24 @@ class Room:
             got = {sk.lower(): min(float(n), 10) / 10 for sk, n in SCORE_RE.findall(text) if sk.lower() in SKILLS}
             if not got:
                 return self.tryout_failed(job, f"{agent['name']} sent no scores")
-            qs = self.s.tryout_of(sid).get("questions", {})
+            tr = self.s.tryout_of(sid)
+            qs = tr.get("questions", {})
             got.update({sk: 0.0 for sk in qs if sk not in got})
-            self.s.add_evidence(sid, got, 2.5)
-            self.s.set_tryout(sid, state="done", marked_by=agent["name"], answers={}, questions={}, marker="",
-                              failed_markers={},
-                              marks={sk: round(v * 10, 1) for sk, v in got.items()}, marked_at=time.time())
+            by = dict(tr.get("marks_by") or {}, **{agent["name"]: {sk: round(v * 10, 1) for sk, v in got.items()}})
             ag = self.s.agent(sid)
-            self.post("system", "room", f"{ag['name']}'s tryout is marked: good at {', '.join(ag['skills'])}")
+            if len(by) < TRYOUT_MARKERS:                 # a second AI marks it too, then the two are averaged
+                self.s.set_tryout(sid, state="answered", marks_by=by, marker="", failed_markers={})
+                self.post("system", "room", f"{agent['name']} marked {ag['name']}'s tryout; "
+                                            "waiting for a second AI to mark it")
+                return self.broadcast("state", self.state())
+            avg = {sk: sum(m.get(sk, 0.0) for m in by.values()) / len(by) for sk in qs or got}
+            self.s.add_evidence(sid, {sk: v / 10 for sk, v in avg.items()}, 2.5)
+            self.s.set_tryout(sid, state="done", marked_by=" and ".join(by), marker="", failed_markers={},
+                              marks={sk: round(v, 1) for sk, v in avg.items()}, marks_by=by,
+                              marked_at=time.time())     # answers and questions stay, so the marks can be checked
+            ag = self.s.agent(sid)
+            self.post("system", "room", f"{ag['name']}'s tryout is marked by {' and '.join(by)}: "
+                                        f"good at {', '.join(ag['skills']) or 'nothing yet'}")
         self.broadcast("state", self.state())
 
     # ---- scheduler
