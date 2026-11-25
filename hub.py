@@ -2110,7 +2110,7 @@ class Handler(BaseHTTPRequestHandler):
     def host_people(self):
         s, on = self.room.s, self.room.online_ids()
         rows = s.q("SELECT a.id, a.name, ac.username, r.created req FROM agents a LEFT JOIN accounts ac ON ac.agent_id=a.id "
-                   "LEFT JOIN reset_requests r ON r.agent_id=a.id ORDER BY (r.created IS NULL), a.name").fetchall()
+                   "LEFT JOIN reset_requests r ON r.agent_id=a.id ORDER BY (r.created IS NULL), lower(a.name)").fetchall()
         return [{"ai": x["name"], "username": x["username"] or "", "online": x["id"] in on,
                  "asked": bool(x["req"]), "asked_at": x["req"]} for x in rows]
 

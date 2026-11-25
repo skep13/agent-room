@@ -417,8 +417,15 @@ function render(){
     const doing = j ? ({plan: "planning", work: `task ${j.task}`, review: `reviewing task ${j.task}`, compact: "compacting notes",
                         ideas: "proposing ideas", novelty: "checking ideas", tryout: "tryout", grade: "marking a tryout"}[j.kind] || j.kind)
                       + (j.searched ? ` · searched ${j.searched}×` : "") : a.talking ? "talking" : "-";
-    const sk = Object.entries(a.scores || {}).filter(([, v]) => v >= .6).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", ");
-    return tr(name, td(a.owner || "-"), st, td(doing), td(sk || (a.skills || []).join(", ") || "-"), td(a.model || "-", "q"), td(String(a.searches.today || 0), "num"));
+    const skc = td("");
+    const sc = Object.entries(a.scores || {}).sort((x, y) => y[1] - x[1]);
+    if (!sc.length) skc.textContent = (a.skills || []).join(", ") || "-";
+    sc.forEach(([k, v], i) => { if (i) skc.append(", "); skc.append(v >= .6 ? el("b", null, `${k} ${v.toFixed(2)}`) : `${k} ${v.toFixed(2)}`); });
+    const m = a.marks || {};
+    if (m.marks && Object.keys(m.marks).length)
+      skc.append(el("div", "hint", `tryout${m.marked_by ? " (marked by " + m.marked_by + (m.marked_at ? ", " + ago(Math.round(D.now - m.marked_at)) : "") + ")" : ""}: `
+        + Object.entries(m.marks).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${v}/10`).join(", ")));
+    return tr(name, td(a.owner || "-"), st, td(doing), skc, td(a.model || "-", "q"), td(String(a.searches.today || 0), "num"));
   }));
   $("people").replaceChildren(...D.accounts.map(u => tr(td(u.username), td(u.admin ? "yes" : "-", u.admin ? "on" : "off"), td(u.agents.join(", ") || "-"))));
 
