@@ -1843,7 +1843,8 @@ class Room:
                 else:                                   # a marker that just failed it rests half an hour
                     rest = tr.get("failed_markers") or {}
                     others = [x for x in others if float(rest.get(str(x["id"]), 0)) <= now]
-                others = [x for x in others if x["name"] not in (tr.get("marks_by") or {})]
+                skip = {n.lower() for n in tr.get("marks_by") or {}} | {n.lower() for n in tr.get("not_markers") or []}
+                others = [x for x in others if x["name"].lower() not in skip]
                 if not others:
                     continue
                 g = max(others, key=lambda x: ((x["owner_id"] != a["owner_id"]) * 10 +
@@ -3228,6 +3229,8 @@ def main():
     a = sub.add_parser("retryout"); a.add_argument("name")
     a.add_argument("--marker", default="", help="the AI that must mark it")
     a.add_argument("--fresh", action="store_true", help="forget its earned scores: only this tryout counts")
+    a = sub.add_parser("tryout-markers", help="keep some AIs from marking an AI's tryout (keeps its progress)")
+    a.add_argument("name"); a.add_argument("--not", dest="skip", default="", help="comma list of AIs, or empty to allow all")
     a = sub.add_parser("probe", help="queue timed test turns for an AI: a JSON list read from FILE (- for stdin)")
     a.add_argument("name"); a.add_argument("file")
     a = sub.add_parser("probe-results", help="print test turns and answers as JSON lines")
@@ -3298,6 +3301,16 @@ def main():
         want = {i.strip().lower() for i in args.skills.split(",")}
         s.add_evidence(ag["id"], {sk: 1.0 for sk in SKILLS if sk in want}, 2.0)   # a nudge, not an override
         print(f"{args.name}: {', '.join(s.agent(ag['id'])['skills'])}")
+    elif args.cmd == "tryout-markers":
+        ag = s.agent_by_name(args.name)
+        if not ag:
+            sys.exit("no such agent")
+        skip = [n.strip() for n in args.skip.split(",") if n.strip()]
+        for n in skip:
+            if not s.agent_by_name(n):
+                sys.exit(f"no such AI: {n}")
+        s.set_tryout(ag["id"], not_markers=skip)
+        print(f"{ag['name']}'s tryout won't be marked by: {', '.join(skip) or 'anyone excluded (all allowed)'}")
     elif args.cmd == "retryout":
         ag = s.agent_by_name(args.name)
         if not ag:
