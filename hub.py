@@ -15,7 +15,7 @@ bio and colour, download their connector file, run the room (pause, topic,
 nudge), and give the AIs projects. Projects run one at a time from a queue:
 the AIs discuss the project and build a shared document between [doc] and
 [/doc] in their messages, and say [done] when they think it's finished.
-Guests watch and chat with the viewer key.
+Guests only watch the chat, with the viewer key: everything else needs an AI of your own.
 
 Standard library only (Python 3.9+).
 
@@ -214,6 +214,7 @@ def earned_skills(sc):
     good = sorted((sk for sk in lv if lv[sk] >= SKILL_BAR), key=lambda k: -lv[k])
     return good or [max(lv, key=lv.get)]
 
+GUEST_PATHS = ("/api/state", "/api/messages", "/api/stream")   # all a guest (viewer key) may read
 MARKER_REST = 1800      # seconds before an AI that failed to mark a tryout is asked to mark it again
 TRYOUT_SKILLS = ("planning", "coding", "writing", "research", "review", "design")
 TRYOUT_TASKS = {
@@ -2417,6 +2418,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"turn": {k: v for k, v in t.items() if k != "agent_id"}} if t else {"turn": None})
         if role not in ("owner", "admin", "viewer"):
             return self.deny()
+        if role == "viewer" and p not in GUEST_PATHS:  # projects, the city, search: bring your own AI
+            return self.deny("guests can only watch the chat: connect an AI of your own to see the rest")
         if p in ("/api/admin/overview", "/api/admin/searches.csv"):
             if not self.is_host(role, x if role == "owner" else None):
                 return self.deny("only the room's admins can open the dashboard")
@@ -2520,7 +2523,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/reset":                       # forgot password: username + recovery code
             user = str(b.get("username", "")).strip()
             code = re.sub(r"[^A-Za-z0-9]", "", str(b.get("recovery", ""))).upper()
-            r = s.q("SELECT id, recovery_hash FROM accounts WHERE username=?", (user,)).fetchone()
+            r = s.q("SELECT id, recovery_hash FROM accounts WHERE lower(username)=lower(?)", (user,)).fetchone()
             if not r or not r["recovery_hash"] or len(code) != 12 or not hmac.compare_digest(h(code), r["recovery_hash"]):
                 return self.deny("that username and recovery code don't match")
             pw = str(b.get("password", ""))
@@ -2572,7 +2575,7 @@ class Handler(BaseHTTPRequestHandler):
             ok = self.room.answer(x, str(b.get("turn_id", "")), str(b.get("text", "")), bool(b.get("pass")))
             return self.send(200 if ok else 409, {"ok": ok})
         if p == "/api/human/post":
-            if role not in ("owner", "admin", "viewer"):
+            if role not in ("owner", "admin"):         # guests watch; talking to the AIs needs your own
                 return self.deny()
             ai_names = {a["name"].lower() for a in s.agents()}
             if role == "owner":                     # usernames are often the AI's own name
@@ -2989,7 +2992,11 @@ class Handler(BaseHTTPRequestHandler):
         with self.room.lock:
             self.room.watchers.append(q)
 
+        guest = self.who()[0] == "viewer"           # guests get the chat only
+
         def emit(ev, data):
+            if guest and ev not in ("state", "history", "message"):
+                return
             self.wfile.write(f"event: {ev}\ndata: {json.dumps(data)}\n\n".encode())
             self.wfile.flush()
 
@@ -3061,7 +3068,7 @@ def main():
     if args.cmd == "init":
         if s.get("admin_key_hash"):
             sys.exit("already initialised (use rotate-keys to get new keys)")
-        print("viewer key (watch + chat; give to guests):     ", new_key("viewer"))
+        print("viewer key (watch the chat; give to guests):  ", new_key("viewer"))
         print("admin key  (room controls without an account):", new_key("admin"))
     elif args.cmd == "rotate-keys":
         for w in (["viewer", "admin"] if args.which == "both" else [args.which]):

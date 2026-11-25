@@ -109,7 +109,9 @@ PROPOSE = (
     "[policy drills on] :: the flood is coming\n"
     "[stockpile food 150] :: stores for the drought\n"
     "[demolish 4,4] :: [repair 5,6]\n"
-    "Coordinates are x,y (x across, y down). A building works at half strength unless it touches a road. "
+    "Coordinates are x,y (x across, y down). Think like a town planner before you pick a spot: look at the map, "
+    "put each building on an empty lot that touches a road, and only add a road when there are no good lots left "
+    "or to reach a new district. A road with nothing along it is wasted money. "
     "Anything else you write is a short note to the council (one or two sentences)."
 )
 VOTE = (
@@ -286,6 +288,12 @@ class City:
     def by_road(self, x, y):
         b = self.st["b"]
         return any((b.get(f"{x + dx},{y + dy}") or {}).get("t") == "road" for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+
+    def road_budget(self):
+        """(roads built, roads allowed): roads are only worth it when they serve buildings."""
+        roads = sum(1 for _ in self.blds("road"))
+        others = sum(1 for _, _, v in self.blds() if v["t"] != "road")
+        return roads, max(10, 2 * others + 4)
 
     def blds(self, t=None, ok_only=False):
         for k, v in list(self.st["b"].items()):
@@ -744,6 +752,15 @@ class City:
                     return "farms can't go on hills"
                 if d.get("by_water") and not self.near_water(x, y):
                     return f"a {d['n'].lower()} has to be next to water"
+                if a["t"] == "road":
+                    if any(True for _ in self.blds("road")) and not self.by_road(x, y):
+                        return "a new road has to join an existing road"
+                    roads, allowed = self.road_budget()
+                    if roads >= allowed:
+                        return (f"the city already has {roads} roads for its buildings; "
+                                "build homes and services along the roads you have first")
+                elif not d.get("by_water") and not self.by_road(x, y):
+                    return "buildings have to touch a road (build next to an existing road)"
             elif a["verb"] == "demolish":
                 if not v:
                     return "there's nothing there"
@@ -841,7 +858,15 @@ class City:
                         spots.append(f"{x},{y}")
                     if self.near_water(x, y):
                         wet.append(f"{x},{y}")
-        lines.append("Empty spots next to a road: " + (" ".join(spots[:16]) or "none (build roads first)"))
+        c = N // 2
+        spots.sort(key=lambda k: abs(int(k.split(",")[0]) - c) + abs(int(k.split(",")[1]) - c))
+        roads, allowed = self.road_budget()
+        lines.append("Empty lots next to a road, nearest the centre first: " + (" ".join(spots[:24]) or "none (extend a road first)"))
+        lines.append(f"Roads: {roads} built, {allowed} allowed for the buildings the city has. New roads must join the "
+                     "existing network; every other building must touch a road. "
+                     + ("Use the empty lots before adding roads. " if roads >= allowed - 2 or len(spots) > 8 else "")
+                     + "Plan districts: homes together with a park, school and clinic nearby; farms, factories and "
+                       "coal power away from homes; keep space beside each road for buildings.")
         lines.append("Empty spots next to water (for a sea wall or fishery): " + " ".join(wet[:12]))
         lines.append("You can build (cost/upkeep a day, what it gives): " + "; ".join(
             f"{k} {d['c']}/{d['u']}" + "".join(f" {lab}{d[f]}" for f, lab in
