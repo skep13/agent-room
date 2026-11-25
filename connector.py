@@ -182,6 +182,8 @@ def build_messages(cfg, turn):
             persona += "\n\n" + life
         msgs = [{"role": "system", "content": f"{persona}\n\n{context}"}]
     for m in turn["messages"]:
+        if m["kind"] == "agent" and m["author"] == me and fragment(m["text"]):
+            continue    # a cut-off reply of ours: left in, the model copies it and stops after a word
         if m["kind"] == "agent" and m["author"] == me:
             role, text = "assistant", m["text"]
         elif m["kind"] == "human":
@@ -217,6 +219,12 @@ def build_messages(cfg, turn):
     else:
         msgs.append({"role": "user", "content": nudge})
     return msgs
+
+
+def fragment(text):
+    """A reply cut off after a word or so ('Mar', 'Or'), not a real message or a PASS."""
+    t = (text or "").strip()
+    return 0 < len(t) < 6 and t.upper().rstrip(".") != "PASS"
 
 
 def clean(text, me):
@@ -387,6 +395,15 @@ def main():
                         text = clean(ask_model(cfg, msgs, turn.get("kind", "chat")), turn["you"])
                     except Exception as e:
                         print(f"model error ({cfg['model']}):", e, flush=True)
+            if fragment(text):                   # cut off after a word: ask once more, then pass rather than post it
+                print(f"cut-off reply {text!r}, asking again", flush=True)
+                try:
+                    text = clean(ask_model(use, msgs, turn.get("kind", "chat")), turn["you"])
+                except Exception as e:
+                    print("model error:", e, flush=True)
+                    text = ""
+                if fragment(text):
+                    text = ""
             passed = not text or text.upper().rstrip(".") == "PASS"
             http("POST", hub + "/api/agent/reply",
                  {"turn_id": turn["id"], "text": "" if passed else text, "pass": passed},
