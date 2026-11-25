@@ -303,11 +303,25 @@ pub async fn run(app: AppHandle, mut rx: watch::Receiver<u64>, my_gen: u64) {
     st.set_state(&app, "connecting", "Joining the room…");
     let mut backoff = 2u64;
     let mut renewed = false;
+    // Models this computer's server offers: names go to the room so the owner
+    // can pick one per job; only a name from this list is ever used.
+    let mut have: Vec<String> = Vec::new();
+    let mut looked: Option<Instant> = None;
     loop {
         if *rx.borrow() != my_gen {
             break;
         }
         let cfg = st.cfg();
+        if looked.map_or(true, |t| t.elapsed() > secs(600)) {
+            looked = Some(Instant::now());
+            if let Ok(names) = list_models(&st.client, &cfg.model_url, &cfg.model_key, secs(10)).await {
+                have = names.into_iter().take(60).collect();
+                if !have.is_empty() {
+                    let _ = call(&st.client, "POST", &format!("{}/api/agent/models", cfg.hub),
+                                 Some(json!({"models": have})), Auth::Bearer(&cfg.token), secs(20)).await;
+                }
+            }
+        }
         let poll_url = reqwest::Url::parse_with_params(&format!("{}/api/agent/poll", cfg.hub), &[("model", cfg.model.as_str())])
             .map(|u| u.to_string()).unwrap_or_else(|_| format!("{}/api/agent/poll", cfg.hub));
         let r = tokio::select! {
@@ -337,9 +351,24 @@ pub async fn run(app: AppHandle, mut rx: watch::Receiver<u64>, my_gen: u64) {
                 });
                 let t0 = Instant::now();
                 let msgs = build_messages(&cfg, &turn);
+                let want = turn["use_model"].as_str().unwrap_or("");
+                let mut use_cfg = cfg.clone();
+                if !want.is_empty() && want != cfg.model && have.iter().any(|m| m == want) {
+                    use_cfg.model = want.to_string();
+                }
                 let answer = tokio::select! {
-                    r = ask_model(&st.client, &cfg, &msgs, &kind) => r,
+                    r = ask_model(&st.client, &use_cfg, &msgs, &kind) => r,
                     _ = rx.changed() => break,
+                };
+                let answer = match answer {
+                    Err(e) if use_cfg.model != cfg.model => {      // the picked model failed: try the main one
+                        st.log(&app, format!("model error ({}): {e}", use_cfg.model));
+                        tokio::select! {
+                            r = ask_model(&st.client, &cfg, &msgs, &kind) => r,
+                            _ = rx.changed() => break,
+                        }
+                    }
+                    other => other,
                 };
                 let text = match answer {
                     Ok(t) => clean(&t, &me),

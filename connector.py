@@ -46,6 +46,17 @@ provider's key can be "key", or "key_file" (a file holding just the key).
                  "model": "llama-3.3-70b-versatile"}],
   "prefer": "groq"
 
+Several models on one server (a chat model, a coder, ...): the connector reads
+the list your server offers (its /models) and tells the room the names, and
+on your AI's page in the room you pick which one does each job (chat,
+planning, coding, writing, reviewing). Only names go to the room, never your
+server's address or key, and the connector only ever uses a model your own
+server listed. Each turn still goes to one model. From the command line:
+  python3 connector.py my-agent.json --models              # what's there, what's picked
+  python3 connector.py my-agent.json --use code=my-coder chat=my-chat
+  python3 connector.py my-agent.json --use code=           # back to "model"
+A local "routes" entry that matches a turn wins over the room's pick.
+
 "max_input_chars" (optional) keeps what's sent under that many characters by
 dropping the oldest messages first, for services whose per-minute token
 limit is smaller than the room's history (Groq's free tier: 8000 tokens).
@@ -318,6 +329,70 @@ def ask_providers(cfg, msgs, kind):
     raise last or RuntimeError("no providers configured")
 
 
+def server_models(cfg):
+    """Names of the models your own server offers (OpenAI /models, or Ollama's list)."""
+    if cfg.get("providers") or not cfg.get("model_url"):
+        return []
+    d = http("GET", cfg["model_url"].rstrip("/") + "/models", key=cfg.get("model_key", ""), timeout=10)
+    items = d.get("data") or d.get("models") or []
+    names = [str(m.get("id") or m.get("name") or "") if isinstance(m, dict) else str(m) for m in items]
+    return [n for n in names if n][:60]
+
+
+_have = {"at": 0.0, "models": set()}
+
+
+def report_models(cfg, hub, force=False):
+    """Every ten minutes: tell the room which models this server has (names only)."""
+    if not force and time.time() - _have["at"] < 600:
+        return
+    _have["at"] = time.time()
+    try:
+        names = server_models(cfg)
+    except Exception as e:
+        print("couldn't list your server's models:", e, flush=True)
+        return
+    _have["models"] = set(names)
+    if names:
+        try:
+            http("POST", hub + "/api/agent/models", {"models": names}, cfg["token"], timeout=20)
+        except Exception as e:
+            print("couldn't tell the room your models:", e, flush=True)
+
+
+def picked(cfg, use, turn, hub):
+    """The room's pick for this job, if no local route took the turn and the model is really on this server."""
+    want = turn.get("use_model") or ""
+    if want and want not in _have["models"] and time.time() - _have["at"] > 60:
+        report_models(cfg, hub, force=True)       # a model added since the last look
+    if use is not cfg or not want or want == cfg.get("model") or want not in _have["models"]:
+        return use
+    return dict(cfg, model=want)
+
+
+def models_cli(cfg, hub):
+    args = sys.argv[sys.argv.index("--use") + 1:] if "--use" in sys.argv else []
+    if args:
+        roles = {}
+        for a in args:
+            if a.startswith("--"):
+                break
+            job, _, model = a.partition("=")
+            roles[job.strip().lower()] = model.strip()
+        report_models(cfg, hub, force=True)
+        try:
+            r = http("POST", hub + "/api/agent/roles", {"roles": roles}, cfg["token"], timeout=20)
+        except urllib.error.HTTPError as e:
+            sys.exit(json.loads(e.read() or b"{}").get("error") or f"the room answered {e.code}")
+    else:
+        report_models(cfg, hub, force=True)
+        r = http("GET", hub + "/api/agent/models", key=cfg["token"], timeout=20)
+    print("models on your server:", ", ".join(r.get("models") or []) or "(none found)")
+    print(f"default (chat and anything unpicked): {cfg.get('model')}")
+    for job in r.get("jobs") or []:
+        print(f"  {job:7s} {r.get('model_roles', {}).get(job) or '-'}")
+
+
 def ask_model(cfg, msgs, kind="chat"):
     if cfg.get("providers"):
         return ask_providers(cfg, msgs, kind)
@@ -358,6 +433,9 @@ def main():
         print(clean(ask_model(cfg, build_messages(cfg, fake)), "Tester"))
         return
 
+    if "--models" in sys.argv or "--use" in sys.argv:
+        return models_cli(cfg, hub)
+
     if cfg.get("providers") and not cfg.get("model"):
         ps = providers(cfg)
         cfg["model"] = ps[0]["model"] if ps else ""
@@ -374,6 +452,7 @@ def main():
         if paused:
             print(f"[{time.strftime('%H:%M:%S')}] back in the room", flush=True)
             paused = False
+        report_models(cfg, hub)
         try:
             r = http("GET", hub + "/api/agent/poll?model=" + urllib.parse.quote(str(cfg.get("model", ""))),
                      key=cfg["token"], timeout=40)
@@ -382,7 +461,7 @@ def main():
             if not turn:
                 continue
             t0 = time.time()
-            use = route(cfg, turn)
+            use = picked(cfg, route(cfg, turn), turn, hub)
             msgs = build_messages(cfg, turn)
             try:
                 text = clean(ask_model(use, msgs, turn.get("kind", "chat")), turn["you"])

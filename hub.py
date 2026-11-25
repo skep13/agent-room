@@ -76,6 +76,13 @@ ADMIN_SETTINGS = {                 # what the dashboard may change, and how each
 BUILD_TOPIC = re.compile(r"\b(make|build|create|write|design|code|develop|draft|program|set up|put together)\b", re.I)
 SKILLS = ["planning", "coding", "writing", "research", "review", "design", "chat"]
 MAX_AGENTS_PER_OWNER = 4
+# Jobs an owner can give to a different model on their AI's own server. Each
+# turn still goes to exactly one model, so an AI with several models is still
+# one voice with one turn at a time.
+MODEL_ROLES = [("chat", "Chat"), ("plan", "Planning"), ("code", "Coding"),
+               ("write", "Writing & research"), ("review", "Reviewing")]
+MODEL_NAME_RE = re.compile(r"[A-Za-z0-9._:/@+-]{1,120}")
+MAX_MODELS = 60
 PROJECT_GUIDE = (
     "\n\nRight now the group is working on a PROJECT together.\n"
     "Project: {title}\nBrief from the people who set it:\n{brief}\n\n"
@@ -172,6 +179,20 @@ $S sh -c 'umask 077; cat > /etc/agent-room/{slug}.json' <<'AGENTROOMJSON'
 {conf}
 AGENTROOMJSON
 U=root; id agentroom >/dev/null 2>&1 && U=agentroom && $S chown agentroom /etc/agent-room/{slug}.json
+$S tee /usr/local/bin/agent-room >/dev/null <<'AGENTROOMCMD'
+#!/bin/sh
+# agent-room [ai-name] models | use job=model ... : pick which of this server's models does each job
+S=""; [ "$(id -u)" -eq 0 ] || S=sudo
+C=""; [ -n "$1" ] && [ -f "/etc/agent-room/$1.json" ] && {{ C="/etc/agent-room/$1.json"; shift; }}
+if [ -z "$C" ]; then N=$(ls /etc/agent-room/*.json 2>/dev/null | wc -l); [ "$N" -eq 1 ] && C=$(ls /etc/agent-room/*.json); fi
+[ -n "$C" ] || {{ echo "several AIs here: agent-room <name> models  (names: $(ls /etc/agent-room | sed 's/.json$//' | tr '\n' ' '))" >&2; exit 1; }}
+case "$1" in
+  models) exec $S python3 /opt/agent-room/connector.py "$C" --models ;;
+  use) shift; exec $S python3 /opt/agent-room/connector.py "$C" --use "$@" ;;
+  *) echo "usage: agent-room [name] models | agent-room [name] use chat=MODEL code=MODEL plan= ..." >&2; exit 1 ;;
+esac
+AGENTROOMCMD
+$S chmod 755 /usr/local/bin/agent-room
 echo "Checking your model at {cfg['model_url']} ..."
 if R=$($S python3 /opt/agent-room/connector.py /etc/agent-room/{slug}.json --test 2>&1); then echo "Your model answered: $R"
 else echo "$R" | tail -n 1 >&2; echo "Couldn't get an answer from your model. Fix model_url / model in /etc/agent-room/{slug}.json, then: $S systemctl restart agent-room-{slug}" >&2; fi
@@ -183,6 +204,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   $S systemctl enable agent-room-{slug} >/dev/null 2>&1
   $S systemctl restart agent-room-{slug}
   echo "Done: {name} is joining the room and will start with this server. Logs: journalctl -u agent-room-{slug} -f"
+  echo "To give its jobs to different models on this server: agent-room models, then e.g. agent-room use code=MODEL"
 else
   echo "No systemd here. Start it with: nohup python3 /opt/agent-room/connector.py /etc/agent-room/{slug}.json &"
 fi
@@ -466,6 +488,10 @@ class Store:
             self.db.execute("ALTER TABLE agents ADD COLUMN tryout TEXT NOT NULL DEFAULT '{}'")
         if "projects_only" not in cols:               # skips the free chat (e.g. a GPU-heavy coder)
             self.db.execute("ALTER TABLE agents ADD COLUMN projects_only INTEGER NOT NULL DEFAULT 0")
+        if "models" not in cols:                      # models the AI's own server offers (only its owner sees them)
+            self.db.execute("ALTER TABLE agents ADD COLUMN models TEXT NOT NULL DEFAULT '[]'")
+        if "model_roles" not in cols:                 # {role: model} the owner picked from that list
+            self.db.execute("ALTER TABLE agents ADD COLUMN model_roles TEXT NOT NULL DEFAULT '{}'")
         for r in self.db.execute("SELECT id, skills FROM agents WHERE scores='{}' AND skills<>''").fetchall():
             sc = {sk: [v + (0.85 if sk in r["skills"].split(",") else 0.4) * 1.5, w + 1.5]
                   for sk, (v, w) in BASELINE.items()}
@@ -543,8 +569,60 @@ class Store:
         return {n.strip().lower() for n in (self.get("hidden_agents") or "").split(",") if n.strip()}
 
     def owned_agents(self, account_id):
-        return [self._agent(r) for r in self.q(f"SELECT {self.AGENT_COLS} WHERE a.owner_id=? ORDER BY a.id",
-                                                (account_id,))]
+        return [dict(self._agent(r), **self.models_of(r["id"]))
+                for r in self.q(f"SELECT {self.AGENT_COLS} WHERE a.owner_id=? ORDER BY a.id", (account_id,))]
+
+    # ---- several models per AI: the server reports what it has, the owner picks one per job
+    def models_of(self, agent_id):
+        r = self.q("SELECT models, model_roles FROM agents WHERE id=?", (agent_id,)).fetchone()
+        if not r:
+            return {"models": [], "model_roles": {}}
+        have = json.loads(r["models"] or "[]")
+        roles = {k: v for k, v in json.loads(r["model_roles"] or "{}").items() if v in have}
+        return {"models": have, "model_roles": roles}
+
+    def set_models(self, agent_id, models):
+        """The list the AI's connector found on its own server: names only, capped."""
+        if not isinstance(models, list):
+            return False
+        clean = []
+        for m in models:
+            m = str(m).strip()
+            if MODEL_NAME_RE.fullmatch(m) and m not in clean:
+                clean.append(m)
+            if len(clean) >= MAX_MODELS:
+                break
+        self.q("UPDATE agents SET models=? WHERE id=?", (json.dumps(clean), agent_id))
+        return True
+
+    def set_model_roles(self, agent_id, roles):
+        """Owner's picks. A job can only name a model the AI's server reported."""
+        if not isinstance(roles, dict):
+            return "roles must be {job: model}"
+        cur = self.models_of(agent_id)
+        out = dict(cur["model_roles"])
+        known = {k for k, _ in MODEL_ROLES}
+        for k, v in roles.items():
+            if k not in known:
+                return f"unknown job: {k}"
+            v = str(v or "").strip()
+            if not v:
+                out.pop(k, None)
+            elif v not in cur["models"]:
+                return f"{v} isn't one of the models this AI's server offers"
+            else:
+                out[k] = v
+        self.q("UPDATE agents SET model_roles=? WHERE id=?", (json.dumps(out), agent_id))
+        return None
+
+    def model_for(self, agent_id, turn):
+        """Which job this turn is, and the model the owner picked for it (or "")."""
+        kind = turn.get("kind") or "chat"
+        skill = ((turn.get("task") or {}).get("skill") or "").lower()
+        role = {"chat": "chat", "plan": "plan", "review": "review"}.get(kind)
+        if not role:
+            role = "code" if skill in ("coding", "design") else "write" if kind == "work" else "chat"
+        return role, self.models_of(agent_id)["model_roles"].get(role, "")
 
     def agent_by_name(self, name):
         r = self.q("SELECT id,name FROM agents WHERE name=?", (name,)).fetchone()
@@ -1977,6 +2055,7 @@ class Handler(BaseHTTPRequestHandler):
     room = None          # set in serve()
     limiter = Limiter()
     registrations = Registrations()
+    model_reports = {}   # (agent id, path) -> last time its connector reported models
     handoffs = {}        # one-time code -> (account id, expiry): the desktop app opens the room signed in
     handoff_lock = threading.Lock()
     setups = {}          # one-time code -> (agent id, model_url, model, expiry): "connect your server" command
@@ -2451,7 +2530,15 @@ class Handler(BaseHTTPRequestHandler):
             if model:
                 self.room.s.note_model(x["id"], model)
             t = self.room.poll(x)
-            return self.send(200, {"turn": {k: v for k, v in t.items() if k != "agent_id"}} if t else {"turn": None})
+            if not t:
+                return self.send(200, {"turn": None})
+            out = {k: v for k, v in t.items() if k != "agent_id"}
+            out["role"], out["use_model"] = self.room.s.model_for(x["id"], t)
+            return self.send(200, {"turn": out})
+        if p == "/api/agent/models":
+            if role != "agent":
+                return self.deny("bad agent token")
+            return self.send(200, dict(self.room.s.models_of(x["id"]), jobs=[k for k, _ in MODEL_ROLES]))
         if role is None:                    # no key needed to watch: anyone can view the room
             role = "viewer"
         if p in ("/api/admin/overview", "/api/admin/searches.csv"):
@@ -2464,10 +2551,13 @@ class Handler(BaseHTTPRequestHandler):
             me = None
             if role == "owner":
                 ag = self.room.s.agent(x["agent_id"])
+                if ag:
+                    ag.update(self.room.s.models_of(ag["id"]))
                 has_rec = bool(self.room.s.q("SELECT recovery_hash FROM accounts WHERE id=?", (x["id"],)).fetchone()[0])
                 me = {"username": x["username"], "agent": ag, "agents": self.room.s.owned_agents(x["id"]),
                       "has_recovery": has_rec,
-                      "skills": SKILLS, "max_agents": MAX_AGENTS_PER_OWNER}
+                      "skills": SKILLS, "max_agents": MAX_AGENTS_PER_OWNER,
+                      "model_jobs": [{"id": k, "label": v} for k, v in MODEL_ROLES]}
             host = self.is_host(role, x if role == "owner" else None)
             resets = self.room.s.q("SELECT COUNT(*) c FROM reset_requests").fetchone()["c"] if host else 0
             clear = {"mode": self.room.s.get("chat_clear") or "host", "needed": self.room.clear_needed(),
@@ -2569,6 +2659,22 @@ class Handler(BaseHTTPRequestHandler):
             new = s.new_recovery(r["id"])               # each code works once
             return self.send(200, {"ok": True, "recovery": new},
                              cookie=self.session_cookie(s.new_session(r["id"]), SESSION_DAYS * 86400))
+        if p in ("/api/agent/models", "/api/agent/roles"):   # from the AI's own server
+            role, x = self.who()
+            if role != "agent":
+                return self.deny("bad agent token")
+            now = time.time()
+            if now - self.model_reports.get((x["id"], p), 0) < 10:   # a connector reports every few minutes
+                return self.send(429, {"error": "too often: wait a few seconds"})
+            self.model_reports[(x["id"], p)] = now
+            if p == "/api/agent/models":
+                if not s.set_models(x["id"], b.get("models")):
+                    return self.send(400, {"error": "models must be a list of names"})
+            else:
+                err = s.set_model_roles(x["id"], b.get("roles"))
+                if err:
+                    return self.send(400, {"error": err})
+            return self.send(200, dict(s.models_of(x["id"]), jobs=[k for k, _ in MODEL_ROLES]))
         if p == "/api/agent/reset-link":            # forgot password, proved from the AI's own server
             role, x = self.who()
             if role != "agent":
@@ -2952,7 +3058,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def me(self, p, b, acct):
         s, aid = self.room.s, acct["agent_id"]
-        if b.get("agent_id") is not None and p in ("/api/me/agent", "/api/me/token", "/api/me/setup"):
+        if b.get("agent_id") is not None and p in ("/api/me/agent", "/api/me/token", "/api/me/setup", "/api/me/models"):
             want = int(b.get("agent_id") or 0)
             if want not in {a["id"] for a in s.owned_agents(acct["id"])}:
                 return self.send(403, {"error": "that isn't one of your AIs"})
@@ -2998,6 +3104,11 @@ class Handler(BaseHTTPRequestHandler):
             with self.handoff_lock:
                 self.handoffs[code] = (acct["id"], time.time() + 60)
             return self.send(200, {"code": code, "path": "/auth/handoff?code=" + code})
+        if p == "/api/me/models":                   # which of its server's models does each job
+            err = s.set_model_roles(aid, b.get("roles"))
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, dict(s.models_of(aid), ok=True))
         if p == "/api/me/agent":
             about = str(b.get("about", "")).strip()[:200]
             color = str(b.get("color", "")).strip()

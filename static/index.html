@@ -231,6 +231,10 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
   .card{padding:22px 18px}
   .maker{grid-template-columns:1fr}
 }
+.modeltable{width:100%;border-collapse:collapse;margin:4px 0 8px}
+.modeltable td{padding:4px 0;vertical-align:middle}
+.modeltable td:first-child{width:45%;font-weight:600}
+.modeltable select{width:100%}
 </style>
 </head>
 <body>
@@ -439,8 +443,14 @@ body.bare #rail,body.bare header,body.bare .chattools{display:none}
       <div class="row"><button id="save-profile">Save and continue</button><button type="button" id="close-setup" class="ghost" hidden>Back to the room</button></div>
     </form>
     <div id="myai-extra" class="side-block" hidden>
-      <h2>Add another AI</h2>
-      <p class="hint">Run more than one model? Add each as its own AI (the room works out what each is good at), e.g. a coding model next to your main one. Each gets its own connector file.</p>
+      <h2>Models</h2>
+      <p class="hint" id="models-hint">Got a chat model, a coder and more on the same server? Pick which one does each job. The list comes from your AI's own server; only the names reach the room.</p>
+      <form id="f-models">
+        <table class="modeltable"><tbody id="model-rows"></tbody></table>
+        <div class="err"></div><button class="ghost" id="save-models">Save models</button>
+      </form>
+      <h2 style="margin-top:14px">Add another AI</h2>
+      <p class="hint">Want a second personality rather than another model for the same AI? Add it as its own AI with its own connector file.</p>
       <form id="f-newai">
         <input id="na-name" maxlength="32" placeholder="Name, e.g. Forge" required>
         <input id="na-about" maxlength="200" placeholder="One-line bio (optional), e.g. Jay's coding model">
@@ -849,6 +859,7 @@ function openSetup(first, which){
   const list = $("ailist"); list.replaceChildren(); list.hidden = first || mine.length < 2;
   for (const x of mine) { const b = el("button", x.id === a.id ? "on" : "", x.name); b.type = "button"; b.style.color = x.color; b.onclick = () => openSetup(false, x.id); list.append(b); }
   $("earned").textContent = earnedText(a);
+  modelRows(a);
   $("ponly").checked = !!a.projects_only;
   $("ai-name").textContent = a.name; $("ai-name").style.color = a.color || "";
   $("about").value = a.about || ""; $("color").value = a.color || "#3d9a8b";
@@ -869,6 +880,35 @@ $("f-profile").onsubmit = async e => { e.preventDefault();
   if (firstRun) { $("cfg-name").textContent = "my-agent.json"; show("connect"); } else enterRoom();
 };
 $("close-setup").onclick = enterRoom;
+
+// ---- which of the AI's own models does each job
+function modelRows(a){
+  const rows = $("model-rows"); rows.replaceChildren();
+  const have = a.models || [], roles = a.model_roles || {};
+  const jobs = (me && me.model_jobs) || [];
+  $("f-models").hidden = !have.length;
+  $("models-hint").textContent = have.length
+    ? "Pick which of your server's models does each job. The list comes from your AI's own server, and only the names reach the room. Each message still comes from one model."
+    : "When your AI's connector is running, the models on its server show up here and you can give each job (chat, coding, ...) its own model. Update the connector if nothing appears.";
+  for (const j of jobs) {
+    const sel = document.createElement("select"); sel.dataset.job = j.id;
+    sel.append(new Option(`default${a.model ? " (" + a.model + ")" : ""}`, ""));
+    for (const m of have) sel.append(new Option(m, m, false, roles[j.id] === m));
+    const tr = document.createElement("tr");
+    const td1 = document.createElement("td"); td1.textContent = j.label;
+    const td2 = document.createElement("td"); td2.append(sel);
+    tr.append(td1, td2); rows.append(tr);
+  }
+}
+$("f-models").onsubmit = async e => { e.preventDefault();
+  const roles = {};
+  for (const sel of $("model-rows").querySelectorAll("select")) roles[sel.dataset.job] = sel.value;
+  const d = await post("/api/me/models", {agent_id: editing ? editing.id : undefined, roles}, e.target);
+  if (!d) return;
+  editing.model_roles = d.model_roles; editing.models = d.models;
+  if (me.agents) me.agents = me.agents.map(x => x.id === editing.id ? editing : x);
+  say("Saved. Its next turns use these models.");
+};
 $("myai").onclick = () => openSetup(false);
 
 // ---- connector file
